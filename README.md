@@ -32,10 +32,10 @@ The system follows a **Decoupled Service-Oriented Architecture (DSOA)** within a
 *   **Handling**: Updates are pushed directly to the chart with <100ms latency. Buckets anchor to UTC standards.
 
 ### B. Stocks Environment
-*   **Source**: Yahoo Finance via `corsproxy.io`.
-*   **Mechanism**: High-frequency Sequential Polling [for       optimized Performance polling 10,000ms].
+*   **Source**: Yahoo Finance via Proxy Rotation- allorigins | corsproxy.io | thingproxy.
+*   **Mechanism**: High-frequency Sequential Polling [for optimized Performance 10,000ms].
 *   **Robust Fetching**:
-    *   **Cache-Busting**: Appends a unique nonce (`cb=Date.now()`) to every request to bypass proxy caching ("Zombie Data").
+    *   **Cache-Busting**: Appends a unique nonce (`cb=Date.now()`) to every request to bypass proxy caching ("Zombie Data").[robustFetchJson-cb=timestamp]
     *   **Sequential Logic**: Uses recursive `setTimeout` instead of `setInterval` to ensure Request(n+1) only starts after Request(n) completes, eliminating "220s Lag" / browser thread exhaustion.
 *   **Mid-Bucket Merge**: The app performs "In-Flight" candle construction, merging real-time ticks into historical buckets to maintain high/low wicks across all timeframes.
 *   **Session Awareness**: Strictly adheres to Regular Trading Hours (RTH). Pre-Market and After-Hours data is handled via specific logic in `marketDataService.ts` and `timeUtils.ts`.
