@@ -73,6 +73,8 @@ The application implements rigorous time management to ensure institutional accu
 5.  **ChartContainer.tsx** renders the enriched data and provides visual snapshots.
 6.  **AIAnalyst.tsx** consumes the snapshot + data to generate reports via `geminiService.ts`.
 
+##TBD##-indicators SMC,DIVERGENCE,PATTERNS -do not Display in Lightweight Charts™-V5.
+
 ## 6. How to Run (e.g. VS Code)
 
 ### Prerequisites
