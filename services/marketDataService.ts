@@ -16,22 +16,66 @@ const BINANCE_WS = 'wss://stream.binance.com:9443';
  * Eliminates "Zombie Data" using Cache-Busting and prevents
  * request stacking with a strict AbortController.
  */
-async function robustFetchJson(url: string, timeout = 10100) {
-    const separator = url.includes('?') ? '&' : '?';
-    const freshUrl = `${url}${separator}cb=${Date.now()}`;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
-    try {
-        const response = await fetch(freshUrl, { 
-            signal: controller.signal,
-            headers: { 'Cache-Control': 'no-cache' }
-        });
-        clearTimeout(id);
-        if (!response.ok) return null;
-        return await response.json();
-    } catch (err) { clearTimeout(id); return null; }
+// ---------------------------------------------------------------------------
+// BLOCK 1: RESILIENT FETCH (Proxy Rotation + Strict Timeout)23.01.26
+// ---------------------------------------------------------------------------
+const PROXIES = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?',
+    'https://thingproxy.freeboard.io/fetch/',
+];
+
+/**
+ * REVISED ROBUST FETCH:
+ * Cycles through PROXIES if a request fails or times out (10s).
+ * Fixes "190s Drift" and Proxy downtime issues.
+ */
+async function robustFetchJson(targetUrl: string, timeout = 10000) {
+    const separator = targetUrl.includes('?') ? '&' : '?';
+    const freshUrl = `${targetUrl}${separator}cb=${Date.now()}`;
+    let lastError: any;
+
+    for (const proxy of PROXIES) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+
+        try {
+            const finalUrl = `${proxy}${encodeURIComponent(freshUrl)}`;
+            
+            const response = await fetch(finalUrl, { 
+                signal: controller.signal,
+                headers: { 'Cache-Control': 'no-cache' }
+            });
+
+            clearTimeout(id);
+
+            if (response.ok) {
+                return await response.json();
+            }
+            
+            throw new Error(`Status ${response.status}`);
+        } catch (err: any) {
+            clearTimeout(id);
+            lastError = err;
+            
+            // If the error is a user-initiated abort, stop entirely
+            if (err.name === 'AbortError' && !controller.signal?.aborted) {
+                 // This was our internal 10s timeout, continue to next proxy
+                 console.warn(`Timeout on ${proxy}, trying next...`);
+                 continue;
+            }
+            
+            console.warn(`Proxy ${proxy} failed, trying next...`);
+        }
+    }
+
+    console.error("All proxies failed for:", targetUrl);
+    return null;
 }
 
+/**
+ * Basic Fetch for clean APIs (like Binance) that don't need proxies.
+ */
 async function basicFetchJson(url: string) {
     try {
         const response = await fetch(url);
@@ -81,15 +125,18 @@ export const fetchAssetQuote = async (asset: Asset): Promise<{
   } 
   
   // B. Stock (Yahoo)
-  else {
+  // Inside fetchAssetQuote (Block 2)
+else {
     const symbol = asset.symbol.replace('/', '-');
-    // We include Pre/Post to get the extended hours data points
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1m&range=1d&includePrePost=true`;
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
     
-    const json = await robustFetchJson(proxyUrl);
+    // 1. Fetch data
+    const json = await robustFetchJson(targetUrl); 
+    
+    // 2. Validate (If null or missing results, exit the else block early)
     if (!json?.chart?.result?.[0]) return null;
     
+    // 3. Extract (json is valid and accessible here)
     const result = json.chart.result[0];
     const meta = result.meta;
 
@@ -173,24 +220,55 @@ export const fetchAssetQuote = async (asset: Asset): Promise<{
 };
 
 export const getMarketData = async (asset: Asset, timeframe: Timeframe): Promise<CandleData[]> => {
+    // A. CRYPTO (Direct fetch from Binance, no proxy needed)
     if (asset.type === AssetType.CRYPTO) {
         const pair = getBinancePair(asset.symbol);
         const p = getTimeframeParams(timeframe, AssetType.CRYPTO);
-        const d = await basicFetchJson(`${BINANCE_API}/klines?symbol=${pair}&interval=${p.apiInterval}&limit=${p.limit}`);
+        const url = `${BINANCE_API}/klines?symbol=${pair}&interval=${p.apiInterval}&limit=${p.limit}`;
+        
+        const d = await basicFetchJson(url);
         if (!Array.isArray(d)) return [];
-        return d.map((x:any) => ({time: new Date(x[0]).toISOString(), open: parseFloat(x[1]), high: parseFloat(x[2]), low: parseFloat(x[3]), close: parseFloat(x[4]), volume: parseFloat(x[5])}));
-    } else {
+
+        return d.map((x: any) => ({
+            time: new Date(x[0]).toISOString(),
+            open: parseFloat(x[1]),
+            high: parseFloat(x[2]),
+            low: parseFloat(x[3]),
+            close: parseFloat(x[4]),
+            volume: parseFloat(x[5])
+        }));
+    } 
+    
+    // B. STOCK (Rotated Proxy Fetch from Yahoo)
+    else {
         const s = asset.symbol.replace('/', '-');
         const p = getTimeframeParams(timeframe, AssetType.STOCK);
-        const u = `https://query1.finance.yahoo.com/v8/finance/chart/${s}?interval=${p.apiInterval}&range=${p.range}&includePrePost=false`;
-        const j = await robustFetchJson(`https://corsproxy.io/?${encodeURIComponent(u)}`);
-        if(!j?.chart?.result?.[0]) return [];
+        
+        // Use a clean target URL (robustFetchJson will wrap this in a proxy)
+        const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${s}?interval=${p.apiInterval}&range=${p.range}&includePrePost=false`;
+        
+        const j = await robustFetchJson(targetUrl);
+        
+        if (!j?.chart?.result?.[0]) return [];
+        
         const r = j.chart.result[0];
         const q = r.indicators.quote[0];
-        return r.timestamp.map((t:number, i:number) => ({
-            time: new Date(t*1000).toISOString(),
-            open: q.open[i], high: q.high[i], low: q.low[i], close: q.close[i], volume: q.volume[i]
-        })).filter((c:any) => c.open && c.close);
+        const timestamps = r.timestamp;
+
+        if (!timestamps || !q) return [];
+
+        return timestamps.map((t: number, i: number) => ({
+            time: new Date(t * 1000).toISOString(),
+            open: q.open[i],
+            high: q.high[i],
+            low: q.low[i],
+            close: q.close[i],
+            volume: q.volume[i] || 0
+        })).filter((c: any) => 
+            c.open !== null && 
+            c.close !== null && 
+            c.open > 0
+        );
     }
 };
 
