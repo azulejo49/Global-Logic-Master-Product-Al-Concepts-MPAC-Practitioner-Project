@@ -2,6 +2,13 @@
 Author: SentiTraderAI- Dev.Team-Amiram Azulay (https://aistudio.google.com|Gemini3-Pro)
 
 **Version:** SentiTraderAIBeta0.3
+
+![React](https://img.shields.io/badge/React-19-blue?logo=react)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.2-blue?logo=typescript)
+![Vite](https://img.shields.io/badge/Vite-Bundler-646CFF?logo=vite)
+![Gemini](https://img.shields.io/badge/AI-Gemini_3_Flash-8E75B2?logo=google)
+![License](https://img.shields.io/badge/License-Apache_2.0-green)
+
 ## 1. Executive Summary
 
 SentiTrader AI is a high-performance, multimodal financial terminal designed to democratize sophisticated market analysis. It bridges the gap between raw data ingestion and actionable intelligence by combining high-frequency charting with Google Gemini 3's multimodal reasoning. The application successfully manages complex state synchronization across disparate asset classes (Crypto/Stocks) while maintaining a sub-500ms UI latency profile.
