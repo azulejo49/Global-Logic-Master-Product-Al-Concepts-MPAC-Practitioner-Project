@@ -489,6 +489,10 @@ lowerTrendSeriesRef.current = chart.addSeries(LineSeries, {
             setLine(rsiSeriesRef as any, 'rsi', indicators.has('RSI'));
 
             try {
+                //if (aggregatedData.length > 0) {//or unique data
+                //const sample = aggregatedData[aggregatedData.length - 1];
+                //console.log(`[MARKER DEBUG] Checking... Data Length: ${aggregatedData.length}, Last RSI: ${sample.rsi}, Indicators: ${Array.from(indicators).join(', ')}`);///24.01.26//revision
+            }
                 if (indicators.has('Trendlines')) {
                     const { upper, lower } = calculateTrendLines(uniqueData as any);
                     if (upperTrendSeriesRef.current) upperTrendSeriesRef.current.setData(upper);
@@ -500,6 +504,7 @@ lowerTrendSeriesRef.current = chart.addSeries(LineSeries, {
 
                 // Wrap marker generation in try-catch to prevent v5 type errors from crashing chart
                 const { priceMarkers, rsiMarkers } = getTechnicalMarkers(uniqueData as any, indicators);
+                //console.log(`[MARKER DEBUG] Generated: ${priceMarkers.length} Price Markers, ${rsiMarkers.length} RSI Markers`);///24.01.26//revision
                 const mainSeries = candlestickSeriesRef.current as any;
                 if (mainSeries && typeof mainSeries.setMarkers === 'function') {
                     mainSeries.setMarkers(priceMarkers);
