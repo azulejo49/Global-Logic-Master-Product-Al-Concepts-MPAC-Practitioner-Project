@@ -139,7 +139,8 @@ else {
     // 3. Extract (json is valid and accessible here)
     const result = json.chart.result[0];
     const meta = result.meta;
-
+    // FIX TBD: Using getIntervalStart prevents "unused variable" error and aligns timestamps
+    // time: new Date(getIntervalStart(t * 1000, timeframe, AssetType.STOCK)).toISOString(),
     // --- STRATEGY: MAX TIMESTAMP SELECTION ---
     // We gather all possible price points and select the one with the LATEST timestamp.
     // This solves the issue where 'meta.regularMarketPrice' is stale during Pre-Market.
