@@ -52,7 +52,7 @@ The application implements rigorous time management to ensure institutional accu
 *   **Drift Detection**: The Debug Engine monitors the delta between the *Exchange Timestamp* (source) and *System Wall Clock* to flag latency or data staleness.
 
 ## 5. File Structure & Component Correlation
-
+##FrontEnd
 ```
 /
 ├── index.html                  # Entry point, styles, Tailwind config, Importmap
