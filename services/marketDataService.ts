@@ -383,7 +383,7 @@ export const subscribeToWatchlist = (
      }
      
      const elapsed = Date.now() - pollStart;
-     const nextDelay = Math.max(100, 10000 - elapsed);
+     const nextDelay = Math.max(2000, 10000 - elapsed);
      
      if (active) setTimeout(pollStocks, nextDelay);
   };
