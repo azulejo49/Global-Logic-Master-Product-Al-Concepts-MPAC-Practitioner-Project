@@ -1,5 +1,5 @@
-// SentiTraderAIBeta0.3//App.tsx
-// Revision 21.01.2026 - dev.team
+// SentiTraderAIBeta//App.tsx
+// Revision 28.01.2026 - dev.team
 // Protocol: Extended Hours Candle Freeze + Live Price Line enabled.
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
@@ -245,25 +245,27 @@ const App: React.FC = () => {
           previousClosesRef.current[selectedAsset.symbol] = realtimeData.previousClose;
       }
 
-      // --- PHASE 1: UI UPDATES (ALWAYS RUN 24/7) ---
-      // This ensures the Watchlist and Chart Price Line update immediately,
-      // even if the market is in Pre/Post session.
-      setAssets(prev => prev.map(a => {
-        if (a.symbol === selectedAssetRef.current.symbol) {
-             const pc = previousClosesRef.current[a.symbol] || a.previousClose || realtimeData.previousClose;
-             // Tick data comes as open=high=low=close=price
-             const newPrice = realtimeData.close; 
-             const newChange = pc ? ((newPrice - pc) / pc) * 100 : a.change;
-             
-             return { 
-               ...a, 
-               price: newPrice, 
-               change: newChange, 
-               previousClose: pc 
-             };
-        }
-        return a;
-      }));
+     // App.tsx - Inside the subscribeToAsset useEffect
+
+// ...
+// --- PHASE 1: UI UPDATES (ALWAYS RUN 24/7) ---
+setAssets(prev => prev.map(a => {
+  if (a.symbol === selectedAssetRef.current.symbol) {
+    const pc = previousClosesRef.current[a.symbol] || a.previousClose || realtimeData.previousClose;
+    const newPrice = realtimeData.close; 
+    const newChange = pc ? ((newPrice - pc) / pc) * 100 : a.change;
+    
+    return { 
+      ...a, 
+      price: newPrice, 
+      change: newChange, 
+      previousClose: pc,
+      // FIX: Update lastRthPrice from realtime data, or preserve existing
+      lastRthPrice: realtimeData.lastRthPrice || a.lastRthPrice 
+    };
+  }
+  return a;
+}));
 
      // 2. CHART CANDLE LOGIC (STRICT FREEZE)
       if (selectedAsset.type === AssetType.STOCK) {
