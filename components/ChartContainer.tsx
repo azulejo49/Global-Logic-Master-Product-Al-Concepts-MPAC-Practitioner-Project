@@ -1,19 +1,27 @@
-// SentiTraderAIBeta0.3/ChartContainer.tsx
-// default- title: `${timerText} dev.team 21.01.2026(SentiTrader AI Beta 0.3)///21.01.2026(SentiTrader AI Beta 0.3)fixed mid bucket stocks snap-candle fulfillment
+// SentiTraderAIBeta//ChartContainer.tsx
+// default- title: `${timerText} // //Revision 28.01.2026 - dev.team-SentiTraderAIBeta//fixed mid bucket stocks snap-candle fulfillment
 import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
-import { createChart, ColorType, CrosshairMode, LineStyle, IChartApi, ISeriesApi, UTCTimestamp, IPriceLine, LineWidth, CandlestickSeries, HistogramSeries, LineSeries, BaselineSeries } from 'lightweight-charts';
+import { createChart, ColorType, CrosshairMode, LineStyle, IChartApi, ISeriesApi, UTCTimestamp, IPriceLine, LineWidth, CandlestickSeries, HistogramSeries, LineSeries, BaselineSeries, SeriesMarker } from 'lightweight-charts';
 import { CandleData, Indicator, Timeframe, AssetType, TradeSetup } from '../types';
 import { getTechnicalMarkers, calculateTrendLines } from '../utils/technicalAnalysis';
 import { getIntervalBoundary, getMarketStatusInfo, formatCountdown } from '../utils/timeUtils';
 
-{/*// HELPER: Convert Timeframe string to seconds for strict bucketing
-const getSecondsInTimeframe = (tf: Timeframe): number => {
+ //HELPER: Convert Timeframe string to seconds for strict bucketing //Revision 24.01.2026 
+   const getSecondsInTimeframe = (tf: Timeframe): number => {
     const mapping: Record<string, number> = {
         '1m': 60, '5m': 300, '15m': 900, '30m': 1800,
         '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800
     };
     return mapping[tf] || 3600;
-};  */}
+   };  
+
+    // Strict Timestamp Normalizer (Fixes Yahoo/Binance differences)
+const normalizeTime = (time: string | number): UTCTimestamp => {
+    let t = typeof time === 'string' ? new Date(time).getTime() : time;
+    // Threshold: 2 Billion (Year 2033). If > 2B, it's milliseconds -> Convert to Seconds.
+    if (t > 2000000000) t = Math.floor(t / 1000);
+    return t as UTCTimestamp;
+};
 
 export interface ChartHandle {
     getSnapshot: () => string | null;
@@ -37,7 +45,7 @@ interface ChartContainerProps {
     isLoading?: boolean;
 }
 
-const ChartContainer = forwardRef<ChartHandle, ChartContainerProps>(({
+    const ChartContainer = forwardRef<ChartHandle, ChartContainerProps>(({
     data, indicators, symbol, activeTimeframe = '1h' as Timeframe, percentageChange = 0, currentPrice, previousClose, debugMode = false, setDebugMode, lastUpdateTimestamp, assetType = AssetType.STOCK, ticksInBucket = 0, tradeSetup, candleBuildStats = { success: 0, fail: 0 }, isLoading = false
 }, ref) => {
     const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -418,116 +426,172 @@ lowerTrendSeriesRef.current = chart.addSeries(LineSeries, {
         });
     };
 
-    // --- CONSOLIDATED DATA EFFECT (BETA 0.3) ---
+   // =========================================================
+    // STRICT AGGREGATION ENGINE (FIXED & CONSOLIDATED)revision 24.01.26//SentiTraderAI dev.team
+    // =========================================================
     useEffect(() => {
         if (!chartRef.current || !candlestickSeriesRef.current || data.length === 0) return;
 
-        // 1. Data Prep
-        const sanitizedData = data.map(d => {
-            let t: number;
-            if (typeof d.time === 'number') {
-                t = d.time > 10000000000 ? Math.floor(d.time / 1000) : d.time;
+        // 1. GET BUCKET SIZE
+        const bucketSize = getSecondsInTimeframe(activeTimeframe);
+
+        // 2. STRICT BUCKET MAPPING (Preserves Indicators like RSI/SMA in ...d)
+        const bucketMap = new Map<number, CandleData>();
+
+        data.forEach(d => {
+            const rawTime = typeof d.time === 'number' ? (d.time > 10000000000 ? d.time/1000 : d.time) : new Date(d.time).getTime()/1000;
+            const bucketTime = Math.floor(rawTime / bucketSize) * bucketSize;
+
+            if (bucketMap.has(bucketTime)) {
+                const existing = bucketMap.get(bucketTime)!;
+                bucketMap.set(bucketTime, {
+                    ...existing,
+                    ...d, // Preserve latest indicator values
+                    open: existing.open, 
+                    high: Math.max(existing.high, d.high),
+                    low: Math.min(existing.low, d.low),
+                    close: d.close, 
+                    volume: existing.volume + d.volume,
+                    time: bucketTime as any 
+                });
             } else {
-                const date = new Date(d.time);
-                if (isNaN(date.getTime())) return null;
-                t = Math.floor(date.getTime() / 1000);
+                bucketMap.set(bucketTime, { ...d, time: bucketTime as any });
             }
-            return { ...d, time: t as UTCTimestamp };
-        }).filter(d => d !== null) as (CandleData & { time: UTCTimestamp })[];
+        });
 
-        if (sanitizedData.length === 0) return;
-        sanitizedData.sort((a, b) => a.time - b.time);
+        // 3. SORT & PREPARE DATA
+        // We use 'aggregatedData' as the Single Source of Truth
+        const aggregatedData = Array.from(bucketMap.values()).sort((a, b) => (a.time as number) - (b.time as number));
 
-        const uniqueData = [sanitizedData[0]];
-        for (let i = 1; i < sanitizedData.length; i++) {
-            if (sanitizedData[i].time !== sanitizedData[i - 1].time) {
-                uniqueData.push(sanitizedData[i]);
-            }
-        }
-
-        try {
-            // 2. MID-BUCKET SNAP FULFILLMENT (STOCKS)
-            // If we have a live price, force the last candle's Close/High/Low to encompass it
-            const lastIdx = uniqueData.length - 1;
-            if (currentPrice && currentPrice > 0 && assetType === AssetType.STOCK && marketStatus.isSessionActive) {
-                const lastCandle = uniqueData[lastIdx];
-                uniqueData[lastIdx] = {
+        // 4. SNAP FULFILLMENT (Update Last Candle with Real Open + Live Price)
+        if (currentPrice && currentPrice > 0) {
+            const lastIdx = aggregatedData.length - 1;
+            const lastCandle = aggregatedData[lastIdx];
+            
+            // --- FIX: FREEZE CANDLE IN EXTENDED HOURS ---
+            // Only update the candle shape if the session is ACTIVE (RTH).
+            // In Pre/Post Market, we want the price line to move, but the candle to freeze.
+            let modifiedCandle = lastCandle;
+            
+            if (assetType === AssetType.CRYPTO || marketStatus.isSessionActive) {
+                modifiedCandle = {
                     ...lastCandle,
                     close: currentPrice, 
                     high: Math.max(lastCandle.high, currentPrice),
                     low: Math.min(lastCandle.low, currentPrice)
                 };
+                aggregatedData[lastIdx] = modifiedCandle;
+            } else {
+                // Extended Hours: Create a dummy modified candle just for the Debug/Health update
+                // but DO NOT modify aggregatedData[lastIdx] so the chart candle stays frozen.
+                modifiedCandle = { ...lastCandle, close: currentPrice };
             }
-
-            candlestickSeriesRef.current.setData(uniqueData);
-
-            if (volumeSeriesRef.current) {
-                volumeSeriesRef.current.setData(uniqueData.map(d => ({
-                    time: d.time,
-                    value: d.volume || 0,
-                    color: d.close >= d.open ? 'rgba(0,220,130,0.1)' : 'rgba(255,77,77,0.1)'
-                })));
+            
+            // Debug Update (Keep this running 24/7 for Drift/Latency)
+            if (typeof handleUpdate === 'function') {
+                handleUpdate(modifiedCandle, lastUpdateTimestamp || Date.now());
             }
+        }
 
-            // 3. Update Indicators
-            const setLine = (ref: React.MutableRefObject<ISeriesApi<any> | null>, key: string, enabled: boolean) => {
-                if (!ref.current) return;
-                const lineData = enabled
-                    ? uniqueData
-                        .filter(d => {
-                            const val = (d as any)[key];
-                            return val !== undefined && val !== null && !Number.isNaN(val) && Number.isFinite(val);
-                        })
-                        .map(d => ({ time: d.time, value: (d as any)[key] }))
-                    : [];
-                ref.current.setData(lineData);
-            };
+        // 5. RENDER MAIN CHART
+        // Create a strictly typed version for the library
+        const chartData = aggregatedData.map(d => ({ ...d, time: d.time as UTCTimestamp }));
+        
+        candlestickSeriesRef.current.setData(chartData);
 
-            setLine(smaSeriesRef as any, 'sma20', indicators.has('SMA'));
-            setLine(emaSeriesRef as any, 'ema50', indicators.has('EMA'));
-            setLine(vwapSeriesRef as any, 'vwap', indicators.has('VWAP'));
-            setLine(rsiSeriesRef as any, 'rsi', indicators.has('RSI'));
+        if (volumeSeriesRef.current) {
+            volumeSeriesRef.current.setData(chartData.map(d => ({
+                time: d.time,
+                value: d.volume || 0,
+                color: d.close >= d.open ? 'rgba(0,220,130,0.1)' : 'rgba(255,77,77,0.1)'
+            })));
+        }
 
-            try {
-                //if (aggregatedData.length > 0) {//or unique data
-                //const sample = aggregatedData[aggregatedData.length - 1];
+        // 6. RENDER LINE INDICATORS
+        const setLine = (ref: React.RefObject<ISeriesApi<any> | null>, key: string, enabled: boolean) => {
+            if (!ref.current) return;
+            const lineData = enabled
+                ? chartData
+                    .filter(d => {
+                        const val = (d as any)[key];
+                        return val !== undefined && val !== null && !Number.isNaN(val) && Number.isFinite(val);
+                    })
+                    .map(d => ({ time: d.time, value: (d as any)[key] }))
+                : [];
+            ref.current.setData(lineData);
+        };
+
+        setLine(smaSeriesRef as any, 'sma20', indicators.has('SMA'));
+        setLine(emaSeriesRef as any, 'ema50', indicators.has('EMA'));
+        setLine(vwapSeriesRef as any, 'vwap', indicators.has('VWAP'));
+        setLine(rsiSeriesRef as any, 'rsi', indicators.has('RSI'));
+
+        // 7. RENDER TRENDLINES & MARKERS+DEBUG console
+        try {
+            if (aggregatedData.length > 0) {
+                const sample = aggregatedData[aggregatedData.length - 1];
                 //console.log(`[MARKER DEBUG] Checking... Data Length: ${aggregatedData.length}, Last RSI: ${sample.rsi}, Indicators: ${Array.from(indicators).join(', ')}`);///24.01.26//revision
             }
-                if (indicators.has('Trendlines')) {
-                    const { upper, lower } = calculateTrendLines(uniqueData as any);
-                    if (upperTrendSeriesRef.current) upperTrendSeriesRef.current.setData(upper);
-                    if (lowerTrendSeriesRef.current) lowerTrendSeriesRef.current.setData(lower);
-                } else {
-                    if (upperTrendSeriesRef.current) upperTrendSeriesRef.current.setData([]);
-                    if (lowerTrendSeriesRef.current) lowerTrendSeriesRef.current.setData([]);
-                }
-
-                // Wrap marker generation in try-catch to prevent v5 type errors from crashing chart
-                const { priceMarkers, rsiMarkers } = getTechnicalMarkers(uniqueData as any, indicators);
-                //console.log(`[MARKER DEBUG] Generated: ${priceMarkers.length} Price Markers, ${rsiMarkers.length} RSI Markers`);///24.01.26//revision
-                const mainSeries = candlestickSeriesRef.current as any;
-                if (mainSeries && typeof mainSeries.setMarkers === 'function') {
-                    mainSeries.setMarkers(priceMarkers);
-                }
-                const rsiSeries = rsiSeriesRef.current as any;
-                if (indicators.has('RSI') && rsiSeries && typeof rsiSeries.setMarkers === 'function') {
-                    rsiSeries.setMarkers(rsiMarkers);
-                }
-            } catch (indErr) { console.error("Indicator Engine Error:", indErr); }
-
-            handleUpdate(uniqueData[lastIdx], lastUpdateTimestamp || Date.now());
-
-            if (data.length !== prevDataLength.current) {
-                if (countdownPriceLineRef.current) { candlestickSeriesRef.current.removePriceLine(countdownPriceLineRef.current); countdownPriceLineRef.current = null; }
-                if (prevCloseLineRef.current) { candlestickSeriesRef.current.removePriceLine(prevCloseLineRef.current); prevCloseLineRef.current = null; }
+            // A. Trendlines
+            if (indicators.has('Trendlines')) {
+                const { upper, lower } = calculateTrendLines(aggregatedData as any);
+                upperTrendSeriesRef.current?.setData(upper.map(u => ({ ...u, time: u.time as UTCTimestamp })));
+                lowerTrendSeriesRef.current?.setData(lower.map(l => ({ ...l, time: l.time as UTCTimestamp })));
+            } else {
+                upperTrendSeriesRef.current?.setData([]);
+                lowerTrendSeriesRef.current?.setData([]);
             }
-            prevDataLength.current = data.length;
-        } catch (err: any) { setDebugStats(prev => ({ ...prev, errors: [err.message] })); }
+
+            // B. Technical Markers (SMC, Patterns, Divergence)previous-getTechnicalMarkers(uniqueData as any, indicators);
+            // We use 'aggregatedData' because it contains the raw indicator values (rsi, etc.)
+            const { priceMarkers, rsiMarkers } = getTechnicalMarkers(aggregatedData as any, indicators);
+            //console.log(`[MARKER DEBUG] Generated: ${priceMarkers.length} Price Markers, ${rsiMarkers.length} RSI Markers`);///24.01.26//revision
+            
+            // SANITIZER: Force normalizeTime on every marker to match the chart data exactly
+            const sanitizeMarkers = (raw: any[]) => {
+                return raw
+                    .map(m => ({
+                        ...m,
+                        time: normalizeTime(m.time), // <--- CRITICAL FIX FOR YAHOO/BINANCE
+                        size: m.size || 1
+                    }))
+                    .sort((a, b) => (a.time as number) - (b.time as number))
+                    .map(m => ({
+                        time: m.time as UTCTimestamp,
+                        position: m.position,
+                        shape: m.shape,
+                        color: m.color,
+                        text: m.text,
+                        size: m.size
+                    } as SeriesMarker<UTCTimestamp>));
+            };
+             //mainSeries.setMarkers(priceMarkers.map((m: any) => ({ ...m, time: m.time as UTCTimestamp })));//24.01.26//revision
+            const mainSeries = candlestickSeriesRef.current as any;
+            if (mainSeries && typeof mainSeries.setMarkers === 'function') {
+                mainSeries.setMarkers(sanitizeMarkers(priceMarkers));
+            }
+            //rsiSeries.setMarkers(rsiMarkers.map((m: any) => ({ ...m, time: m.time as UTCTimestamp })));//24.01.26//revision
+            const rsiSeries = rsiSeriesRef.current as any;
+            if (indicators.has('RSI') && rsiSeries && typeof rsiSeries.setMarkers === 'function') {
+                rsiSeries.setMarkers(sanitizeMarkers(rsiMarkers));
+            }
+
+        } catch (indErr) { 
+            console.error("Indicator/Marker Engine Error:", indErr); 
+        }
+
+        // 8. CLEANUP PRICE LINES
+        if (data.length !== prevDataLength.current) {
+            if (countdownPriceLineRef.current) { candlestickSeriesRef.current.removePriceLine(countdownPriceLineRef.current); countdownPriceLineRef.current = null; }
+            if (prevCloseLineRef.current) { candlestickSeriesRef.current.removePriceLine(prevCloseLineRef.current); prevCloseLineRef.current = null; }
+        }
+        prevDataLength.current = data.length;
+
     }, [data, currentPrice, indicators, symbol, lastUpdateTimestamp, ticksInBucket, candleBuildStats, assetType, previousClose, marketStatus]);
 
     useImperativeHandle(ref, () => ({ getSnapshot: () => chartRef.current?.takeScreenshot().toDataURL('image/png') || null }));
 
-    // --- SYNCED LEGEND LOGIC (BETA 0.3) ---
+    // --- SYNCED LEGEND LOGIC (BETA) ---
     const hCandle = legendCandle || data[data.length - 1];
     const isLiveView = marketStatus.isSessionActive || (currentPrice !== undefined && (marketStatus.label === 'AFTER-HOURS' || marketStatus.label === 'PRE-MARKET'));
     const isCurrentBar = !legendCandle || (data.length > 0 && new Date(legendCandle.time).getTime() === new Date(data[data.length - 1].time).getTime());
