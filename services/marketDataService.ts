@@ -1,9 +1,7 @@
-
 // SentiTraderAIBeta0.3/services/marketDataService.ts
-// Revision: 22.01.2026 - Feature: Real OHLC Extraction + Strict Polling
+// Revision: 28.01.2026 - Feature: "Time-Traveler" Candidate Selection for Extended Hours//Small stagger delay added
 
 import { Asset, AssetType, CandleData, Timeframe } from '../types';
-import { getIntervalStart } from '../utils/timeUtils';
 
 const BINANCE_API = 'https://api.binance.com/api/v3';
 const BINANCE_WS = 'wss://stream.binance.com:9443';
@@ -11,71 +9,22 @@ const BINANCE_WS = 'wss://stream.binance.com:9443';
 // ---------------------------------------------------------------------------
 // BLOCK 1: ROBUST FETCH (Cache Busting)
 // ---------------------------------------------------------------------------
-/**
- * REVISED ROBUST FETCH (STOCKS):
- * Eliminates "Zombie Data" using Cache-Busting and prevents
- * request stacking with a strict AbortController.
- */
-// ---------------------------------------------------------------------------
-// BLOCK 1: RESILIENT FETCH (Proxy Rotation + Strict Timeout)23.01.26
-// ---------------------------------------------------------------------------
-const PROXIES = [
-    'https://api.allorigins.win/raw?url=',
-    'https://corsproxy.io/?',
-    'https://thingproxy.freeboard.io/fetch/',
-];
-
-/**
- * REVISED ROBUST FETCH:
- * Cycles through PROXIES if a request fails or times out (10s).
- * Fixes "190s Drift" and Proxy downtime issues.
- */
-async function robustFetchJson(targetUrl: string, timeout = 10000) {
-    const separator = targetUrl.includes('?') ? '&' : '?';
-    const freshUrl = `${targetUrl}${separator}cb=${Date.now()}`;
-    let lastError: any;
-
-    for (const proxy of PROXIES) {
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), timeout);
-
-        try {
-            const finalUrl = `${proxy}${encodeURIComponent(freshUrl)}`;
-            
-            const response = await fetch(finalUrl, { 
-                signal: controller.signal,
-                headers: { 'Cache-Control': 'no-cache' }
-            });
-
-            clearTimeout(id);
-
-            if (response.ok) {
-                return await response.json();
-            }
-            
-            throw new Error(`Status ${response.status}`);
-        } catch (err: any) {
-            clearTimeout(id);
-            lastError = err;
-            
-            // If the error is a user-initiated abort, stop entirely
-            if (err.name === 'AbortError' && !controller.signal?.aborted) {
-                 // This was our internal 10s timeout, continue to next proxy
-                 console.warn(`Timeout on ${proxy}, trying next...`);
-                 continue;
-            }
-            
-            console.warn(`Proxy ${proxy} failed, trying next...`);
-        }
-    }
-
-    console.error("All proxies failed for:", targetUrl);
-    return null;
+async function robustFetchJson(url: string, timeout = 10100) {
+    const separator = url.includes('?') ? '&' : '?';
+    const freshUrl = `${url}${separator}cb=${Date.now()}`;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await fetch(freshUrl, { 
+            signal: controller.signal,
+            headers: { 'Cache-Control': 'no-cache' }
+        });
+        clearTimeout(id);
+        if (!response.ok) return null;
+        return await response.json();
+    } catch (err) { clearTimeout(id); return null; }
 }
 
-/**
- * Basic Fetch for clean APIs (like Binance) that don't need proxies.
- */
 async function basicFetchJson(url: string) {
     try {
         const response = await fetch(url);
@@ -85,7 +34,7 @@ async function basicFetchJson(url: string) {
 }
 
 // ---------------------------------------------------------------------------
-// BLOCK 2: ASSET QUOTE FETCHER (Enhanced for Real OHLC)
+// BLOCK 2: ASSET QUOTE FETCHER (Enhanced for Real OHLC & Extended Hours)
 // ---------------------------------------------------------------------------
 const prevCloseCache: Record<string, number> = {};
 const getBinancePair = (s: string) => {
@@ -102,8 +51,9 @@ const getTimeframeParams = (tf: Timeframe, type: AssetType) => {
 };
 
 /**
- * Enhanced Fetch: Returns 'realCandle' to ensure O/H/L are correct mid-bucket.
- * IMPLEMENTS: Max-Timestamp Strategy to capture Pre-Market/Extended Hours correctly.
+ * Enhanced Fetch: "Time-Traveler" Strategy.
+ * Aggressively finds the latest timestamp from Metadata OR Candle History to ensure
+ * Extended Hours (Pre/Post) are never static.
  */
 export const fetchAssetQuote = async (asset: Asset): Promise<{ 
     price: number, change: number, previousClose: number, lastRthPrice?: number, timestamp: number,
@@ -125,151 +75,126 @@ export const fetchAssetQuote = async (asset: Asset): Promise<{
   } 
   
   // B. Stock (Yahoo)
-  // Inside fetchAssetQuote (Block 2)
-else {
+  else {
     const symbol = asset.symbol.replace('/', '-');
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1m&range=1d&includePrePost=true`;
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
     
-    // 1. Fetch data
-    const json = await robustFetchJson(targetUrl); 
-    
-    // 2. Validate (If null or missing results, exit the else block early)
+    const json = await robustFetchJson(proxyUrl);
     if (!json?.chart?.result?.[0]) return null;
     
-    // 3. Extract (json is valid and accessible here)
     const result = json.chart.result[0];
     const meta = result.meta;
-    // FIX TBD: Using getIntervalStart prevents "unused variable" error and aligns timestamps
-    // time: new Date(getIntervalStart(t * 1000, timeframe, AssetType.STOCK)).toISOString(),
-    // --- STRATEGY: MAX TIMESTAMP SELECTION ---
-    // We gather all possible price points and select the one with the LATEST timestamp.
-    // This solves the issue where 'meta.regularMarketPrice' is stale during Pre-Market.
-    
-    interface PriceCandidate { price: number; time: number; label: string; }
-    const candidates: PriceCandidate[] = [];
+    const timestamps = result.timestamp || [];
+    const quote = result.indicators.quote[0] || {};
 
-    // 1. Regular Market
-    if (meta.regularMarketPrice && meta.regularMarketTime) {
-        candidates.push({ price: meta.regularMarketPrice, time: meta.regularMarketTime, label: 'REG' });
-    }
-    // 2. Pre Market
-    if (meta.preMarketPrice && meta.preMarketTime) {
-        candidates.push({ price: meta.preMarketPrice, time: meta.preMarketTime, label: 'PRE' });
-    }
-    // 3. Post Market
-    if (meta.postMarketPrice && meta.postMarketTime) {
-        candidates.push({ price: meta.postMarketPrice, time: meta.postMarketTime, label: 'POST' });
-    }
-
-    // 4. Last Candle in Array (Often fresher than Meta during transitions)
-    let realCandle = undefined;
-    const timestamps = result.timestamp;
-    const quote = result.indicators.quote[0];
+    // --- STRATEGY: CANDIDATE SELECTION ---
+    // We collect all possible "Live" data points and pick the one with the LATEST timestamp.
     
-    if (timestamps && quote && timestamps.length > 0) {
+    const candidates = [];
+
+    // 1. Regular Market Meta
+    if (meta.regularMarketTime && meta.regularMarketPrice) {
+        candidates.push({ source: 'REG', time: meta.regularMarketTime, price: meta.regularMarketPrice });
+    }
+    // 2. Pre-Market Meta
+    if (meta.preMarketTime && meta.preMarketPrice) {
+        candidates.push({ source: 'PRE', time: meta.preMarketTime, price: meta.preMarketPrice });
+    }
+    // 3. Post-Market Meta
+    if (meta.postMarketTime && meta.postMarketPrice) {
+        candidates.push({ source: 'POST', time: meta.postMarketTime, price: meta.postMarketPrice });
+    }
+    // 4. Last Candle (Often the freshest source in early Pre-Market)
+    if (timestamps.length > 0) {
         const lastIdx = timestamps.length - 1;
         const lastTime = timestamps[lastIdx];
         const lastClose = quote.close[lastIdx];
-        
-        // Push candidate if valid
         if (lastTime && lastClose) {
-            candidates.push({ price: lastClose, time: lastTime, label: 'CANDLE' });
+            candidates.push({ source: 'CANDLE', time: lastTime, price: lastClose });
         }
+    }
 
-        // Prepare Real Candle object if recent (< 5 mins old)
-        if (Date.now()/1000 - lastTime < 300) {
+    // ELECT WINNER: Sort by Time Descending
+    candidates.sort((a, b) => b.time - a.time);
+    const winner = candidates[0];
+
+    // Fallback defaults
+    let livePrice = winner ? winner.price : (meta.regularMarketPrice || 0);
+    let liveTime = winner ? winner.time : (meta.regularMarketTime || 0);
+
+    // --- ANCHORING LOGIC ---
+    // Last RTH Price is ALWAYS the Regular Market Price (Yesterday's Close if we are in Pre-Market)
+    const lastRthPrice = meta.regularMarketPrice || 0;
+    
+    // Reference Close for % Change (Yesterday's Settlement)
+    let refClose = meta.chartPreviousClose || meta.previousClose || meta.regularMarketPreviousClose || 0;
+    
+    // FIX: EXTENDED HOURS OVERRIDE
+    // If the "Winner" is Extended Hours (Pre/Post/Newer Candle), strictly use Last RTH Price as reference.
+    // This fixes the "poor calculation" where it compares Live Pre-Market vs T-2 Close.
+    if (lastRthPrice > 0) {
+        const isExtendedSource = winner && (winner.source === 'PRE' || winner.source === 'POST');
+        const isNewerCandle = winner && winner.source === 'CANDLE' && winner.time > (meta.regularMarketTime || 0);
+        
+        if (isExtendedSource || isNewerCandle) {
+            refClose = lastRthPrice;
+        }
+    }
+    
+    // Persist cache to prevent N/A flickering
+    if (refClose) prevCloseCache[symbol] = refClose;
+    else if (prevCloseCache[symbol]) refClose = prevCloseCache[symbol];
+
+    // Calculate Change relative to the Reference Close
+    const changePct = refClose ? ((livePrice - refClose) / refClose) * 100 : 0;
+
+    // --- REAL CANDLE EXTRACTION (Mid-Bucket Fix) ---
+    let realCandle = undefined;
+    if (timestamps.length > 0 && quote.open) {
+        const lastIdx = timestamps.length - 1;
+        // Only use if recent (< 300s) to avoid ghost candles
+        if (Date.now()/1000 - timestamps[lastIdx] < 300) {
             realCandle = {
                 open: quote.open[lastIdx],
                 high: quote.high[lastIdx],
                 low: quote.low[lastIdx],
-                close: lastClose,
-                volume: quote.volume[lastIdx] || 0
+                close: quote.close[lastIdx],
+                volume: quote.volume[lastIdx]
             };
         }
     }
 
-    // --- SELECTION ---
-    // Sort descending by time
-    candidates.sort((a, b) => b.time - a.time);
-    const winner = candidates[0]; // The most recent data point available
-
-    // Fallback if no candidates (rare)
-    const livePrice = winner ? winner.price : (meta.regularMarketPrice || 0);
-    const liveTime = winner ? winner.time : (meta.regularMarketTime || 0);
-
-    // --- REFERENCE PRICES ---
-    // RTH Close is strictly the Regular Market Price (for 2nd row in Watchlist)
-    const lastRthPrice = meta.regularMarketPrice || livePrice;
-    
-    // Previous Close logic for Change % calculation
-    let rthClose = meta.previousClose || meta.chartPreviousClose || meta.regularMarketPreviousClose;
-    if (rthClose) prevCloseCache[symbol] = rthClose;
-    else if (prevCloseCache[symbol]) rthClose = prevCloseCache[symbol];
-    
-    // Calculate change based on the selected Live Price vs Reference
-    const changePct = rthClose ? ((livePrice - rthClose) / rthClose) * 100 : 0;
-
     return {
       price: livePrice,
       change: changePct,
-      previousClose: rthClose || 0,
-      lastRthPrice: lastRthPrice, // IMPORTANT: Used for Watchlist Secondary Row
-      timestamp: liveTime * 1000,
+      previousClose: refClose,
+      lastRthPrice: lastRthPrice, // Passed to Watchlist Row 2
+      timestamp: liveTime * 1000, // Convert to ms for App.tsx
       realCandle
     };
   }
 };
 
 export const getMarketData = async (asset: Asset, timeframe: Timeframe): Promise<CandleData[]> => {
-    // A. CRYPTO (Direct fetch from Binance, no proxy needed)
     if (asset.type === AssetType.CRYPTO) {
         const pair = getBinancePair(asset.symbol);
         const p = getTimeframeParams(timeframe, AssetType.CRYPTO);
-        const url = `${BINANCE_API}/klines?symbol=${pair}&interval=${p.apiInterval}&limit=${p.limit}`;
-        
-        const d = await basicFetchJson(url);
+        const d = await basicFetchJson(`${BINANCE_API}/klines?symbol=${pair}&interval=${p.apiInterval}&limit=${p.limit}`);
         if (!Array.isArray(d)) return [];
-
-        return d.map((x: any) => ({
-            time: new Date(x[0]).toISOString(),
-            open: parseFloat(x[1]),
-            high: parseFloat(x[2]),
-            low: parseFloat(x[3]),
-            close: parseFloat(x[4]),
-            volume: parseFloat(x[5])
-        }));
-    } 
-    
-    // B. STOCK (Rotated Proxy Fetch from Yahoo)
-    else {
+        return d.map((x:any) => ({time: new Date(x[0]).toISOString(), open: parseFloat(x[1]), high: parseFloat(x[2]), low: parseFloat(x[3]), close: parseFloat(x[4]), volume: parseFloat(x[5])}));
+    } else {
         const s = asset.symbol.replace('/', '-');
         const p = getTimeframeParams(timeframe, AssetType.STOCK);
-        
-        // Use a clean target URL (robustFetchJson will wrap this in a proxy)
-        const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${s}?interval=${p.apiInterval}&range=${p.range}&includePrePost=false`;
-        
-        const j = await robustFetchJson(targetUrl);
-        
-        if (!j?.chart?.result?.[0]) return [];
-        
+        const u = `https://query1.finance.yahoo.com/v8/finance/chart/${s}?interval=${p.apiInterval}&range=${p.range}&includePrePost=false`;
+        const j = await robustFetchJson(`https://corsproxy.io/?${encodeURIComponent(u)}`);
+        if(!j?.chart?.result?.[0]) return [];
         const r = j.chart.result[0];
         const q = r.indicators.quote[0];
-        const timestamps = r.timestamp;
-
-        if (!timestamps || !q) return [];
-
-        return timestamps.map((t: number, i: number) => ({
-            time: new Date(t * 1000).toISOString(),
-            open: q.open[i],
-            high: q.high[i],
-            low: q.low[i],
-            close: q.close[i],
-            volume: q.volume[i] || 0
-        })).filter((c: any) => 
-            c.open !== null && 
-            c.close !== null && 
-            c.open > 0
-        );
+        return r.timestamp.map((t:number, i:number) => ({
+            time: new Date(t*1000).toISOString(),
+            open: q.open[i], high: q.high[i], low: q.low[i], close: q.close[i], volume: q.volume[i]
+        })).filter((c:any) => c.open && c.close);
     }
 };
 
@@ -293,7 +218,7 @@ export const subscribeToAsset = (asset: Asset, timeframe: Timeframe, onUpdate: (
       return () => ws.close();
   }
 
-  // STOCK POLLER (Sequential)
+  // STOCK POLLER
   let active = true;
   const executeSequentialPoll = async () => {
     if (!active) return;
@@ -306,7 +231,7 @@ export const subscribeToAsset = (asset: Asset, timeframe: Timeframe, onUpdate: (
         if (quote.realCandle) {
             tickData = {
                 time: quote.timestamp,
-                open: quote.realCandle.open, // Real Open from API
+                open: quote.realCandle.open, 
                 high: Math.max(quote.realCandle.high, quote.price),
                 low: Math.min(quote.realCandle.low, quote.price),
                 close: quote.price,
@@ -368,27 +293,25 @@ export const subscribeToWatchlist = (
   }
 
   // B. Stock Watchlist (Polling)
-  const pollStocks = async () => {
+ const pollStocks = async () => {
      if (!active) return;
-     const pollStart = Date.now();
-
      if (stocks.length > 0) {
-        const results = await Promise.all(stocks.map(async (s) => {
-             const q = await fetchAssetQuote(s as Asset); 
-             if (q) return { symbol: s.symbol, price: q.price, change: q.change, timestamp: q.timestamp, previousClose: q.previousClose, lastRthPrice: q.lastRthPrice }; 
-             return null;
-        }));
-        const validUpdates = results.filter(u => u !== null);
-        if (validUpdates.length > 0) onUpdate(validUpdates as any);
+        const updates = [];
+        // Process in small batches or sequentially to avoid rate limits
+        for (const s of stocks) {
+            if (!active) break;
+            const q = await fetchAssetQuote(s as Asset); 
+            if (q) {
+                updates.push({ symbol: s.symbol, price: q.price, change: q.change, timestamp: q.timestamp, previousClose: q.previousClose });
+            }
+            // Small stagger delay
+            await new Promise(r => setTimeout(r, 500)); 
+        }
+        if (updates.length > 0 && active) onUpdate(updates);
      }
-     
-     const elapsed = Date.now() - pollStart;
-     const nextDelay = Math.max(2000, 10000 - elapsed);
-     
-     if (active) setTimeout(pollStocks, nextDelay);
+     if (active) setTimeout(pollStocks, 10000); // 10s loop for background watchlist
   };
   
   if (stocks.length > 0) pollStocks();
-
   return () => { active = false; if (ws) ws.close(); };
-};
+  };
