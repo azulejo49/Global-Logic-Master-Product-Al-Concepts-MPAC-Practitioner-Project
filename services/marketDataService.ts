@@ -1,5 +1,5 @@
 // SentiTraderAIBeta0.3/services/marketDataService.ts
-// Revision: 28.01.2026 - Feature: "Time-Traveler" Candidate Selection for Extended Hours//Small stagger delay added
+// Revision: 29.01.2026 - Feature: "Time-Traveler" Candidate Selection for Extended Hours//Small stagger delay added/revision-29.01.26-const PROXIES = allorigins/corsproxy.io/thingproxy.freeboard.io/
 
 import { Asset, AssetType, CandleData, Timeframe } from '../types';
 
@@ -9,6 +9,15 @@ const BINANCE_WS = 'wss://stream.binance.com:9443';
 // ---------------------------------------------------------------------------
 // BLOCK 1: ROBUST FETCH (Cache Busting)
 // ---------------------------------------------------------------------------
+// Proxy Rotation Strategy for Yahoo Finance
+// Prioritize reliable CORS proxies. 'allorigins' is often more stable than 'corsproxy.io'.
+//const PROXIES = [
+  //'https://api.allorigins.win/raw?url=',
+  //'https://corsproxy.io/?',
+  //'https://thingproxy.freeboard.io/fetch/',
+//];
+
+
 async function robustFetchJson(url: string, timeout = 10100) {
     const separator = url.includes('?') ? '&' : '?';
     const freshUrl = `${url}${separator}cb=${Date.now()}`;
