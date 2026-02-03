@@ -1,6 +1,6 @@
 // SentiTraderAIBeta//App.tsx
-// Revision 28.01.2026 - dev.team
-// Protocol: Extended Hours Candle Freeze + Live Price Line enabled.
+// Revision 03.02.2026 - dev.team
+// Protocol: Extended Hours Candle Freeze + Live Price Line enabled./added const newChange = realtimeData.change////anchored % change calcul.to last rthclose(pre/post) [DIAGNOSTIC FIX] row 256
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Asset, CandleData, Indicator, Timeframe, AIAnalysisReport, AssetType, TradeSetup } from './types';
@@ -247,23 +247,38 @@ const App: React.FC = () => {
 
      // App.tsx - Inside the subscribeToAsset useEffect
 
-// ...
-// --- PHASE 1: UI UPDATES (ALWAYS RUN 24/7) ---
-setAssets(prev => prev.map(a => {
-  if (a.symbol === selectedAssetRef.current.symbol) {
-    const pc = previousClosesRef.current[a.symbol] || a.previousClose || realtimeData.previousClose;
-    const newPrice = realtimeData.close; 
-    const newChange = pc ? ((newPrice - pc) / pc) * 100 : a.change;
-    
-    return { 
-      ...a, 
-      price: newPrice, 
-      change: newChange, 
-      previousClose: pc,
-      // FIX: Update lastRthPrice from realtime data, or preserve existing
-      lastRthPrice: realtimeData.lastRthPrice || a.lastRthPrice 
-    };
-  }
+/// --- PHASE 1: UI UPDATES (ALWAYS LIVE) ---
+      setAssets(prev => prev.map(a => {
+        if (a.symbol === selectedAssetRef.current.symbol) {
+          
+          const newPrice = realtimeData.close; 
+          
+          // [DIAGNOSTIC FIX] -----------------------------------------------------
+          // 1. Identify the Math Anchor:
+          // The Service uses 'lastRthPrice' as the strict reference for Pre/Post market.
+          // We must use the same value for local calculations to prevent drift.
+          const mathAnchor = realtimeData.lastRthPrice || a.lastRthPrice || realtimeData.previousClose || a.previousClose;
+
+          // 2. Identify the Visual Anchor (for chart line):
+          const visualAnchor = realtimeData.previousClose || previousClosesRef.current[a.symbol] || a.previousClose;
+
+          // 3. Calculate Change:
+          // Priority A: Trust the Service provided change (if available).
+          // Priority B: Local Recalculation using 'mathAnchor' (Last RTH Price).
+          const newChange = (realtimeData.change !== undefined && realtimeData.change !== null)
+              ? realtimeData.change 
+              : (mathAnchor ? ((newPrice - mathAnchor) / mathAnchor) * 100 : a.change);
+          // ----------------------------------------------------------------------
+
+          return { 
+            ...a, 
+            price: newPrice, 
+            change: newChange, 
+            previousClose: visualAnchor,
+            // Strictly persist lastRthPrice to ensure the next tick has the correct mathAnchor
+            lastRthPrice: realtimeData.lastRthPrice || a.lastRthPrice 
+          };
+        }
   return a;
 }));
 
