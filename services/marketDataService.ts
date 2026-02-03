@@ -1,37 +1,57 @@
-// SentiTraderAIBeta0.3/services/marketDataService.ts
-// Revision: 29.01.2026 - Feature: "Time-Traveler" Candidate Selection for Extended Hours//Small stagger delay added/revision-29.01.26-const PROXIES = allorigins/corsproxy.io/thingproxy.freeboard.io/
+// SentiTraderAIBeta/services/marketDataService.ts//Optimized Polling(batch-4)+ getIntervalStart } from '../utils/timeUtils';
+// Revision: 03.02.2026 -dev/team/ Feature:rth last close-price-rows 69-71+anchored to watchlist-2ndrow-[batch polling 4-assets per batch]| "Time-Traveler" Candidate Selection for Extended Hours//Small stagger delay added
 
 import { Asset, AssetType, CandleData, Timeframe } from '../types';
-
+import { getIntervalStart } from '../utils/timeUtils';
 const BINANCE_API = 'https://api.binance.com/api/v3';
 const BINANCE_WS = 'wss://stream.binance.com:9443';
 
 // ---------------------------------------------------------------------------
 // BLOCK 1: ROBUST FETCH (Cache Busting)
 // ---------------------------------------------------------------------------
-// Proxy Rotation Strategy for Yahoo Finance
-// Prioritize reliable CORS proxies. 'allorigins' is often more stable than 'corsproxy.io'.
-//const PROXIES = [
-  //'https://api.allorigins.win/raw?url=',
-  //'https://corsproxy.io/?',
-  //'https://thingproxy.freeboard.io/fetch/',
-//];
+const PROXIES = [
+    // Primary: High speed, but strict CORS
+    'https://corsproxy.io/?',
+    // Fallback 1: Reliable
+   // 'https://api.allorigins.win/raw?url=',
+    // Fallback 2: Good for heavy payloads
+  // 'https://api.codetabs.com/v1/proxy?quest=',
+    // Fallback 3: Last resort
+    'https://thingproxy.freeboard.io/fetch/', 
+];
 
+/**
+ * Fetches JSON by rotating through proxies.
+ * Fix: Now accepts a CLEAN URL and appends proxies internally.
+ */
+async function robustFetchJson(cleanUrl: string, timeout = 12200) {
+    const separator = cleanUrl.includes('?') ? '&' : '?';
+    const freshSuffix = `${separator}cb=${Date.now()}`;
 
-async function robustFetchJson(url: string, timeout = 10100) {
-    const separator = url.includes('?') ? '&' : '?';
-    const freshUrl = `${url}${separator}cb=${Date.now()}`;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
-    try {
-        const response = await fetch(freshUrl, { 
-            signal: controller.signal,
-            headers: { 'Cache-Control': 'no-cache' }
-        });
-        clearTimeout(id);
-        if (!response.ok) return null;
-        return await response.json();
-    } catch (err) { clearTimeout(id); return null; }
+    for (const proxyBase of PROXIES) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        
+        try {
+            // Encode strictly to ensure complex query params survive the proxy transit
+            const target = `${proxyBase}${encodeURIComponent(cleanUrl + freshSuffix)}`;
+            
+            const response = await fetch(target, { 
+                signal: controller.signal,
+                headers: { 'Cache-Control': 'no-cache' }
+            });
+            
+            clearTimeout(id);
+            
+            if (response.ok) {
+                return await response.json();
+            }
+        } catch (err) { 
+            clearTimeout(id);
+            // Silently fail and rotate to the next proxy
+        }
+    }
+    return null; // All proxies failed
 }
 
 async function basicFetchJson(url: string) {
@@ -43,9 +63,14 @@ async function basicFetchJson(url: string) {
 }
 
 // ---------------------------------------------------------------------------
-// BLOCK 2: ASSET QUOTE FETCHER (Enhanced for Real OHLC & Extended Hours)
+// BLOCK 2: ASSET QUOTE FETCHER (Enhanced for Real OHLC & Extended Hours)/added lastRthCache/03.02.26
 // ---------------------------------------------------------------------------
+// [FIX] Caches for both Price and Time to bridge API gaps
 const prevCloseCache: Record<string, number> = {};
+const lastRthPriceCache: Record<string, number> = {};
+const lastRthTimeCache: Record<string, number> = {};
+
+
 const getBinancePair = (s: string) => {
     const c = s.toUpperCase().replace(/\s/g,'').replace('/','');
     return (c==='BTCUSD'||c==='BTC'?'BTCUSDT':(c==='ETHUSD'||c==='ETH'?'ETHUSDT':(c.includes('USDT')?c:c+'USDT')));
@@ -87,9 +112,10 @@ export const fetchAssetQuote = async (asset: Asset): Promise<{
   else {
     const symbol = asset.symbol.replace('/', '-');
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1m&range=1d&includePrePost=true`;
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
     
-    const json = await robustFetchJson(proxyUrl);
+    // FIX: Pass the raw URL. robustFetchJson handles the proxies now.
+    const json = await robustFetchJson(targetUrl);
+    
     if (!json?.chart?.result?.[0]) return null;
     
     const result = json.chart.result[0];
@@ -100,63 +126,61 @@ export const fetchAssetQuote = async (asset: Asset): Promise<{
     // --- STRATEGY: CANDIDATE SELECTION ---
     // We collect all possible "Live" data points and pick the one with the LATEST timestamp.
     
-    const candidates = [];
-
-    // 1. Regular Market Meta
-    if (meta.regularMarketTime && meta.regularMarketPrice) {
-        candidates.push({ source: 'REG', time: meta.regularMarketTime, price: meta.regularMarketPrice });
-    }
-    // 2. Pre-Market Meta
-    if (meta.preMarketTime && meta.preMarketPrice) {
-        candidates.push({ source: 'PRE', time: meta.preMarketTime, price: meta.preMarketPrice });
-    }
-    // 3. Post-Market Meta
-    if (meta.postMarketTime && meta.postMarketPrice) {
-        candidates.push({ source: 'POST', time: meta.postMarketTime, price: meta.postMarketPrice });
-    }
-    // 4. Last Candle (Often the freshest source in early Pre-Market)
+   const candidates = [];
+    if (meta.regularMarketTime && meta.regularMarketPrice) candidates.push({ source: 'REG', time: meta.regularMarketTime, price: meta.regularMarketPrice });
+    if (meta.preMarketTime && meta.preMarketPrice) candidates.push({ source: 'PRE', time: meta.preMarketTime, price: meta.preMarketPrice });
+    if (meta.postMarketTime && meta.postMarketPrice) candidates.push({ source: 'POST', time: meta.postMarketTime, price: meta.postMarketPrice });
     if (timestamps.length > 0) {
         const lastIdx = timestamps.length - 1;
-        const lastTime = timestamps[lastIdx];
-        const lastClose = quote.close[lastIdx];
-        if (lastTime && lastClose) {
-            candidates.push({ source: 'CANDLE', time: lastTime, price: lastClose });
+        if (timestamps[lastIdx] && quote.close[lastIdx]) {
+            candidates.push({ source: 'CANDLE', time: timestamps[lastIdx], price: quote.close[lastIdx] });
         }
     }
-
-    // ELECT WINNER: Sort by Time Descending
     candidates.sort((a, b) => b.time - a.time);
     const winner = candidates[0];
 
-    // Fallback defaults
-    let livePrice = winner ? winner.price : (meta.regularMarketPrice || 0);
-    let liveTime = winner ? winner.time : (meta.regularMarketTime || 0);
+    const livePrice = winner ? winner.price : (meta.regularMarketPrice || 0);
+    const liveTime = winner ? winner.time : (meta.regularMarketTime || 0);
 
-    // --- ANCHORING LOGIC ---
-    // Last RTH Price is ALWAYS the Regular Market Price (Yesterday's Close if we are in Pre-Market)
-    const lastRthPrice = meta.regularMarketPrice || 0;
-    
-    // Reference Close for % Change (Yesterday's Settlement)
-    let refClose = meta.chartPreviousClose || meta.previousClose || meta.regularMarketPreviousClose || 0;
-    
-    // FIX: EXTENDED HOURS OVERRIDE
-    // If the "Winner" is Extended Hours (Pre/Post/Newer Candle), strictly use Last RTH Price as reference.
-    // This fixes the "poor calculation" where it compares Live Pre-Market vs T-2 Close.
-    if (lastRthPrice > 0) {
-        const isExtendedSource = winner && (winner.source === 'PRE' || winner.source === 'POST');
-        const isNewerCandle = winner && winner.source === 'CANDLE' && winner.time > (meta.regularMarketTime || 0);
-        
-        if (isExtendedSource || isNewerCandle) {
-            refClose = lastRthPrice;
-        }
+    // 2. DEFINE ANCHORS
+    // -----------------------------------------------------------
+    // [FIX] PERSISTENT CACHING FOR STABLE PERCENTAGES
+    // -----------------------------------------------------------
+    // 2. RESOLVE & CACHE RTH DATA (Price & Time)
+    let rthPrice = meta.regularMarketPrice;
+    let rthTime = meta.regularMarketTime;
+
+    // Cache Logic: If data exists, save it. If not, load from cache.
+    if (rthPrice) lastRthPriceCache[symbol] = rthPrice;
+    else rthPrice = lastRthPriceCache[symbol] || 0;
+
+    if (rthTime) lastRthTimeCache[symbol] = rthTime;
+    else rthTime = lastRthTimeCache[symbol] || 0;
+
+    // Fallbacks if cache is empty
+    if (!rthPrice) rthPrice = meta.chartPreviousClose || meta.previousClose || 0;
+
+    const prevClose = meta.regularMarketPreviousClose || meta.previousClose || meta.chartPreviousClose || 0;
+
+    // 3. CALCULATE LIVE CHANGE (TIME GAP LOGIC)
+    let anchorForLiveChange = prevClose; // Default to Regular Hours Anchor (T-2/T-1 Previous)
+
+    // Calculate gap in seconds between Live Data and Regular Market Data
+    // In Pre-Market (Monday), liveTime is Today, rthTime is Friday. Gap is huge.
+    // In RTH (Monday), liveTime is Today, rthTime is Today. Gap is small (~0).
+    const timeGapSeconds = liveTime - rthTime;
+
+    // [CRITICAL FIX] If gap > 20 mins (1200s), we are definitely in Extended Hours (Pre/Post/Weekend).
+    // In this case, we MUST anchor to the RTH Close (T-1) to show correct drift.
+    if (rthPrice > 0 && timeGapSeconds > 3000) {
+        anchorForLiveChange = rthPrice;
     }
-    
-    // Persist cache to prevent N/A flickering
-    if (refClose) prevCloseCache[symbol] = refClose;
-    else if (prevCloseCache[symbol]) refClose = prevCloseCache[symbol];
 
-    // Calculate Change relative to the Reference Close
-    const changePct = refClose ? ((livePrice - refClose) / refClose) * 100 : 0;
+    // Persist Anchor Cache
+    if (anchorForLiveChange) prevCloseCache[symbol] = anchorForLiveChange;
+    else if (prevCloseCache[symbol]) anchorForLiveChange = prevCloseCache[symbol];
+
+    const changePct = anchorForLiveChange ? ((livePrice - anchorForLiveChange) / anchorForLiveChange) * 100 : 0;
 
     // --- REAL CANDLE EXTRACTION (Mid-Bucket Fix) ---
     let realCandle = undefined;
@@ -177,14 +201,15 @@ export const fetchAssetQuote = async (asset: Asset): Promise<{
     return {
       price: livePrice,
       change: changePct,
-      previousClose: refClose,
-      lastRthPrice: lastRthPrice, // Passed to Watchlist Row 2
+      previousClose: prevClose,
+      lastRthPrice: rthPrice, // Passed to Watchlist Row 2/03.02/26
       timestamp: liveTime * 1000, // Convert to ms for App.tsx
       realCandle
     };
   }
 };
 
+     // BLOCK 3: HISTORICAL DATA FETCH (The Chart Source)
 export const getMarketData = async (asset: Asset, timeframe: Timeframe): Promise<CandleData[]> => {
     if (asset.type === AssetType.CRYPTO) {
         const pair = getBinancePair(asset.symbol);
@@ -196,12 +221,18 @@ export const getMarketData = async (asset: Asset, timeframe: Timeframe): Promise
         const s = asset.symbol.replace('/', '-');
         const p = getTimeframeParams(timeframe, AssetType.STOCK);
         const u = `https://query1.finance.yahoo.com/v8/finance/chart/${s}?interval=${p.apiInterval}&range=${p.range}&includePrePost=false`;
-        const j = await robustFetchJson(`https://corsproxy.io/?${encodeURIComponent(u)}`);
+        
+        // FIX: Removed manual 'corsproxy.io' prefix. 02.02.26
+        // We pass the RAW 'u' so robustFetchJson can apply rotation correctly.
+        const j = await robustFetchJson(u);
+        
         if(!j?.chart?.result?.[0]) return [];
         const r = j.chart.result[0];
         const q = r.indicators.quote[0];
+        
         return r.timestamp.map((t:number, i:number) => ({
-            time: new Date(t*1000).toISOString(),
+            // FIX: Restored getIntervalStart to ensure alignment (prevents unused var error)
+            time: new Date(getIntervalStart(t*1000, timeframe, AssetType.STOCK)).toISOString(),
             open: q.open[i], high: q.high[i], low: q.low[i], close: q.close[i], volume: q.volume[i]
         })).filter((c:any) => c.open && c.close);
     }
@@ -301,26 +332,32 @@ export const subscribeToWatchlist = (
     };
   }
 
-  // B. Stock Watchlist (Polling)
- const pollStocks = async () => {
+ // B. Stock (Optimized Batch Polling)
+  const pollStocks = async () => {
      if (!active) return;
      if (stocks.length > 0) {
-        const updates = [];
-        // Process in small batches or sequentially to avoid rate limits
-        for (const s of stocks) {
+        // IMPROVEMENT: Process in chunks of 4 to prevent total blocking
+        const CHUNK_SIZE = 4;
+        for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
             if (!active) break;
-            const q = await fetchAssetQuote(s as Asset); 
-            if (q) {
-                updates.push({ symbol: s.symbol, price: q.price, change: q.change, timestamp: q.timestamp, previousClose: q.previousClose });
-            }
-            // Small stagger delay
-            await new Promise(r => setTimeout(r, 500)); 
+            const chunk = stocks.slice(i, i + CHUNK_SIZE);
+            //added lastRthPrice: q.lastRthPrice to -fetchAssetQuote(s as Asset);/rev.03.02.26
+            const updates = await Promise.all(chunk.map(async (s) => {
+                const q = await fetchAssetQuote(s as Asset);
+                if (q) return { symbol: s.symbol, price: q.price, change: q.change, timestamp: q.timestamp, lastRthPrice: q.lastRthPrice, previousClose: q.previousClose };
+                return null;
+            }));
+            
+            const valid = updates.filter(u => u !== null);
+            if (valid.length > 0 && active) onUpdate(valid as any);
+            
+            // Short rest between chunks to be kind to the API
+            await new Promise(r => setTimeout(r, 800));
         }
-        if (updates.length > 0 && active) onUpdate(updates);
      }
-     if (active) setTimeout(pollStocks, 10000); // 10s loop for background watchlist
+     if (active) setTimeout(pollStocks, 11000); // 11s Loop
   };
   
   if (stocks.length > 0) pollStocks();
   return () => { active = false; if (ws) ws.close(); };
-  };
+};
