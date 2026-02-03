@@ -1,4 +1,4 @@
-//types.ts
+//types.ts// //Revision 03.02.2026 - dev.team-SentiTraderAIBeta
 export enum AssetType {
   CRYPTO = 'CRYPTO',
   STOCK = 'STOCK',
@@ -38,8 +38,8 @@ export interface ChatMessage {
 }
 
 export interface SentimentData {
-  score: number; // 0 (Fear) to 100 (Hype)
-  condition: 'Fear' | 'Neutral' | 'Hype' | 'Extreme Fear' | 'Extreme Hype';
+  score: number; // 0 (Fear) to 100 (Greed)
+  condition: 'Fear' | 'Neutral' | 'Greed' | 'Extreme Fear' | 'Extreme Greed';
   sourcesScanned: number; 
   socialVolume: 'Low' | 'Moderate' | 'High' | 'Viral';
   keywords: string[];
