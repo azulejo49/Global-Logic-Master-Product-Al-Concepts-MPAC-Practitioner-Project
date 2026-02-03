@@ -1,4 +1,7 @@
-//watchlist.tsx/dev.team 21.01.2026(SentiTrader AI Beta 0.3
+// components/Watchlist.tsx
+// Revision: 03.02.2026 -STAIBeta/ dev.team
+// Fix: Aligned "Closed" row to show Last RTH Price instead of % Anchor/ updated last rth close row
+
 import React, { useState, useRef, useEffect } from 'react';
 import { Asset, AssetType } from '../types';
 import { getMarketStatusInfo } from '../utils/timeUtils';
@@ -22,19 +25,20 @@ interface AssetRowProps {
   onDragEnter: (index: number) => void;
   onDragEnd: () => void;
   isDragging: boolean;
-  currentTick: number; // Force update on time change
+  currentTick: number; 
 }
 
 const AssetRow: React.FC<AssetRowProps> = ({ 
   asset, selectedAsset, onSelect, onRemove, 
-  index, onDragStart, onDragEnter, onDragEnd, isDragging, currentTick
+  index, onDragStart, onDragEnter, onDragEnd 
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSelected = selectedAsset.symbol === asset.symbol;
   const status = getMarketStatusInfo(asset.type);
-  const isExtended = (status.label === 'PRE-MARKET' || status.label === 'AFTER-HOURS') && asset.type === AssetType.STOCK;
+  
+  // Extended Hours: Show double row if Pre-Market or After-Hours
+  const isExtended = (status.label === 'PRE-MARKET' || status.label === 'AFTER-HOURS' || status.label === 'CLOSED') && asset.type === AssetType.STOCK;
 
-  // Beacon Logic: open/live-green, close-grey, extended hours(pre-mkt-yellow, post-mkt-blue)
   const renderBeacon = () => {
       if (status.label === 'AFTER-HOURS') {
           return (
@@ -46,18 +50,29 @@ const AssetRow: React.FC<AssetRowProps> = ({
       return <div className={`w-1.5 h-1.5 rounded-full ${status.beaconColor}`} title={status.label}></div>;
   };
 
-  // Calculate Absolute Change
-  let absChange = 0;
-  if (asset.previousClose && asset.previousClose > 0) {
-      absChange = asset.price - asset.previousClose;
-  } else if (asset.price > 0) {
-      // Reverse engineer if prevClose missing: Price / (1 + change%) = PrevClose
-      const prev = asset.price / (1 + (asset.change / 100));
-      absChange = asset.price - prev;
-  }
-
-  const changeColor = asset.change >= 0 ? 'text-green-400' : 'text-red-400';
+  // --- LIVE CHANGE (Primary Row) ---
+  // asset.change comes pre-calculated from service (Live vs RTH Close)
   const isPending = asset.price === 0;
+  // Live Anchor is used just for color logic if needed, but we rely on asset.change for %.
+  // Approx Live Change Amount
+  const liveAnchor = asset.lastRthPrice || asset.previousClose || 0;
+  const liveChangeAmt = !isPending ? (asset.price - liveAnchor) : 0;
+  const changeColor = asset.change >= 0 ? 'text-green-400' : 'text-red-400';
+
+  // --- RTH CLOSE CHANGE (Secondary Row) ---03.02.26
+  // Logic: RTH Close (343.69) - Prev Close (338.23) = +5.46
+  const rthClose = asset.lastRthPrice || 0;
+  const prevClose = asset.previousClose || 0;
+  
+  let rthChangeAmt = 0;
+  let rthChangePct = 0;
+  
+  if (rthClose > 0 && prevClose > 0) {
+      rthChangeAmt = rthClose - prevClose;
+      rthChangePct = (rthChangeAmt / prevClose) * 100;
+  }
+  
+  const rthColor = rthChangeAmt >= 0 ? 'text-green-400' : 'text-red-400';
 
   return (
     <div 
@@ -84,16 +99,15 @@ const AssetRow: React.FC<AssetRowProps> = ({
           <span className="text-[9px] text-slate-600 truncate">{asset.name}</span>
         </div>
 
-        {/* Beacon - Adjusted to justify-start to move it left */}
+        {/* Beacon */}
         <div className="col-span-1 flex justify-start items-center -ml-3">
             {renderBeacon()}
         </div>
         
-        {/* Data Columns (Merged for Layout Control) */}
+        {/* Data Columns /03.02.26*/}
         <div className="col-span-7 flex flex-col items-end gap-0.5">
-            {/* Primary Row: Current / Ext Price */}
+            {/* Primary Row: Current Price */}
             <div className="flex items-center justify-end gap-3 w-full">
-               {/* Price - Beta 0.3 BTC Spacing Fix */}
                <span className="font-mono text-[10px] text-slate-200 text-right w-[50px] pr-1">
                 {!isPending
                  ? asset.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -101,10 +115,10 @@ const AssetRow: React.FC<AssetRowProps> = ({
                            }
                     </span>
 
-                {/* Change Values */}
+                {/* Live Change (70px wide) */}
                 <div className="flex items-center justify-end gap-2 min-w-[70px]">
                     <span className={`font-mono text-[7px] w-[35px] text-right ${changeColor}`}>
-                        {!isPending ? (absChange > 0 ? '+' : '') + absChange.toFixed(2) : '-'}
+                        {!isPending ? (liveChangeAmt > 0 ? '+' : '') + liveChangeAmt.toFixed(2) : '-'}
                     </span>
                     <span className={`font-mono text-[9px] font-bold w-[40px] text-right ${changeColor}`}>
                         {!isPending ? (asset.change > 0 ? '+' : '') + asset.change.toFixed(2) + '%' : '--%'}
@@ -112,23 +126,29 @@ const AssetRow: React.FC<AssetRowProps> = ({
                 </div>
             </div>
 
-            {/* Secondary Row: Last RTH (Close) distinguish from prev,close*/}
-            {isExtended && !isPending && (
+            {/* Secondary Row: RTH CLOSE STATS */}
+            {isExtended && !isPending && rthClose > 0 && (
                 <div className="flex items-center justify-end gap-3 w-full opacity-60">
                      <span className="text-[7px] text-slate-500 uppercase tracking-wide mr-auto pl-2">Closed</span>
                      
-                     <span className="font-mono text-[10px] text-slate-400 text-right w-[60px]">
-                        {asset.previousClose?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                     <span className="font-mono text-[10px] text-slate-400 text-right w-[50px]">
+                        {rthClose.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                      </span>
                      
-                     {/* Spacer to align with change columns */}
-                     <div className="min-w-[70px]"></div>
+                     {/* RTH Change Stats (This div IS 70px wide, replacing the spacer) */}
+                     <div className="flex items-center justify-end gap-2 min-w-[70px]">
+                        <span className={`font-mono text-[7px] w-[35px] text-right ${rthColor}`}>
+                            {(rthChangeAmt > 0 ? '+' : '') + rthChangeAmt.toFixed(2)}
+                        </span>
+                        <span className={`font-mono text-[9px] font-bold w-[40px] text-right ${rthColor}`}>
+                            {(rthChangePct > 0 ? '+' : '') + rthChangePct.toFixed(2) + '%'}
+                        </span>
+                     </div>
                 </div>
             )}
         </div>
       </div>
-      
-      {/* Delete Action - Only visible on hover */}
+      {/* Delete Action */}
       {isHovered && (
         <button 
           onClick={(e) => {
@@ -147,30 +167,24 @@ const AssetRow: React.FC<AssetRowProps> = ({
 const Watchlist: React.FC<WatchlistProps> = ({ assets, selectedAsset, onSelect, onRemove, onAdd, onReorder }) => {
   const [newSymbol, setNewSymbol] = useState('');
   const [clock, setClock] = useState('');
-  const [nowTick, setNowTick] = useState(Date.now()); // Master tick for children
+  const [nowTick, setNowTick] = useState(Date.now()); 
   const dragItem = useRef<number | null>(null);
   const dragOverItem = useRef<number | null>(null);
 
   useEffect(() => {
     const updateClock = () => {
       const now = new Date();
-      setNowTick(now.getTime()); // Update tick to force re-render of asset rows
+      setNowTick(now.getTime()); 
       const isCrypto = selectedAsset.type === AssetType.CRYPTO;
       const timeZone = isCrypto ? 'UTC' : 'America/New_York';
       const label = isCrypto ? 'UTC' : 'NY';
       
       try {
         const timeStr = new Intl.DateTimeFormat('en-US', {
-          timeZone,
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false
+          timeZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }).format(now);
         setClock(`${timeStr} ${label}`);
-      } catch (e) {
-        setClock('--:--:--');
-      }
+      } catch (e) { setClock('--:--:--'); }
     };
 
     updateClock();
@@ -180,10 +194,7 @@ const Watchlist: React.FC<WatchlistProps> = ({ assets, selectedAsset, onSelect, 
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (newSymbol.trim()) {
-      onAdd(newSymbol.trim());
-      setNewSymbol('');
-    }
+    if (newSymbol.trim()) { onAdd(newSymbol.trim()); setNewSymbol(''); }
   };
 
   const handleDragStart = (e: React.DragEvent, index: number) => {
@@ -204,10 +215,7 @@ const Watchlist: React.FC<WatchlistProps> = ({ assets, selectedAsset, onSelect, 
       }
   };
 
-  const handleDragEnd = () => {
-      dragItem.current = null;
-      dragOverItem.current = null;
-  };
+  const handleDragEnd = () => { dragItem.current = null; dragOverItem.current = null; };
 
   return (
     <div className="h-full flex flex-col bg-slate-950 border-r border-slate-800 w-64 shrink-0 overflow-hidden font-sans">
@@ -216,13 +224,10 @@ const Watchlist: React.FC<WatchlistProps> = ({ assets, selectedAsset, onSelect, 
         <span className="text-[10px] font-mono font-bold text-blue-400">{clock}</span>
       </div>
       
-      {/* Search/Add */}
       <div className="p-2 border-b border-slate-800 bg-slate-900/50">
         <form onSubmit={handleSubmit} className="relative">
           <input 
-            type="text" 
-            value={newSymbol}
-            onChange={(e) => setNewSymbol(e.target.value)}
+            type="text" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)}
             placeholder="Add Symbol + Enter" 
             className="w-full bg-slate-950 border border-slate-800 rounded-sm px-2 py-1.5 text-xs text-slate-200 focus:border-blue-600 outline-none placeholder-slate-700 font-mono"
           />
@@ -233,25 +238,13 @@ const Watchlist: React.FC<WatchlistProps> = ({ assets, selectedAsset, onSelect, 
       <div className="overflow-y-auto flex-1 custom-scrollbar">
           {assets.map((asset, index) => (
             <AssetRow 
-                key={asset.symbol} 
-                asset={asset} 
-                index={index}
-                selectedAsset={selectedAsset} 
-                onSelect={onSelect} 
-                onRemove={onRemove}
-                onDragStart={handleDragStart}
-                onDragEnter={handleDragEnter}
-                onDragEnd={handleDragEnd}
-                isDragging={false}
-                currentTick={nowTick}
+                key={asset.symbol} asset={asset} index={index}
+                selectedAsset={selectedAsset} onSelect={onSelect} onRemove={onRemove}
+                onDragStart={handleDragStart} onDragEnter={handleDragEnter} onDragEnd={handleDragEnd}
+                isDragging={false} currentTick={nowTick}
             />
           ))}
-
-        {assets.length === 0 && (
-           <div className="p-4 text-center text-xs text-slate-600 font-mono mt-4">
-              // NO ASSETS WATCHED
-           </div>
-        )}
+        {assets.length === 0 && <div className="p-4 text-center text-xs text-slate-600 font-mono mt-4">// NO ASSETS WATCHED</div>}
       </div>
     </div>
   );
