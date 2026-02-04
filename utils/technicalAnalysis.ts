@@ -1,21 +1,17 @@
-// SentiTraderAIBeta0.3/technical Analysis.ts
+// SentiTraderAIBeta/utils/technicalAnalysis.ts//rev.04.02.26-debug-console-log added
 import { CandleData, Indicator, Timeframe } from '../types';
-import type { SeriesMarker, Time, UTCTimestamp, SeriesMarkerPosition, SeriesMarkerShape } from 'lightweight-charts';
+import type { SeriesMarker, UTCTimestamp, Time } from 'lightweight-charts';
 
-// --- HELPER: Safe Time Conversion for Sorting Only ---
-// We use this to compare times (sort), but we NEVER change the actual marker time format.
-const toTimeValue = (time: Time): number => {
-    if (typeof time === 'number') return time;
-    if (typeof time === 'string') return new Date(time).getTime();
-    if (typeof time === 'object' && time !== null) {
-        if ('year' in time && 'month' in time && 'day' in time) {
-             return new Date(time.year, time.month - 1, time.day).getTime();
-        }
-    }
-    return 0;
+// --- DEBUG HELPER ---
+const logDebug = (tag: string, message: string, data?: any) => {
+    // Optional: You can wrap this in a global debug flag check if needed
+    // if (!window.DEBUG_MODE) return; 
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(`%c[${timestamp}] [${tag}]`, 'color: #00d4ff; font-weight: bold;', message, data !== undefined ? data : '');
 };
 
 // --- Dynamic Settings based on Timeframe ---
+
 export const getMASettings = (timeframe: Timeframe) => {
   if (timeframe === '5m' || timeframe === '15m') {
     return { smaPeriod: 20, emaPeriod: 50, label: 'Intraday' };
@@ -33,6 +29,7 @@ export const getMASettings = (timeframe: Timeframe) => {
 };
 
 // --- Basic Indicators ---
+
 export const calculateSMA = (data: CandleData[], period: number): number[] => {
   if (data.length === 0) return [];
   return data.map((_, index) => {
@@ -114,10 +111,34 @@ export const calculateVWAP = (data: CandleData[]): number[] => {
 export const enrichDataWithIndicators = (data: CandleData[], indicators: Set<Indicator>, timeframe: Timeframe): CandleData[] => {
   if (data.length === 0) return [];
   const settings = getMASettings(timeframe);
-  const smas = indicators.has('SMA') ? calculateSMA(data, settings.smaPeriod) : [];
-  const emas = indicators.has('EMA') ? calculateEMA(data, settings.emaPeriod) : [];
+  // Debug Log for Settings
+  if (indicators.has('SMA') || indicators.has('EMA')) {
+      logDebug('Settings', `Timeframe: ${timeframe}, Label: ${settings.label}`, settings);
+  }
+
+  let smas: number[] = [];
+  if (indicators.has('SMA')) {
+      smas = calculateSMA(data, settings.smaPeriod);
+      logDebug('SMA', `Calculated Period: ${settings.smaPeriod}`, { lastValue: smas[smas.length - 1] });
+  }
+
+  let emas: number[] = [];
+  if (indicators.has('EMA')) {
+      emas = calculateEMA(data, settings.emaPeriod);
+      logDebug('EMA', `Calculated Period: ${settings.emaPeriod}`, { lastValue: emas[emas.length - 1] });
+  }
+
+  // RSI is always calculated for potential divergence logic, but we log only if explicitly needed
   const rsis = calculateRSI(data, 14); 
-  const vwaps = indicators.has('VWAP') ? calculateVWAP(data) : [];
+  if (indicators.has('RSI')) {
+      logDebug('RSI', 'Calculated standard RSI(14)', { lastValue: rsis[rsis.length - 1] });
+  }
+
+  let vwaps: number[] = [];
+  if (indicators.has('VWAP')) {
+      vwaps = calculateVWAP(data);
+      logDebug('VWAP', 'Calculated Intraday VWAP', { lastValue: vwaps[vwaps.length - 1] });
+  }
 
   return data.map((candle, i) => ({
     ...candle,
@@ -128,9 +149,10 @@ export const enrichDataWithIndicators = (data: CandleData[], indicators: Set<Ind
   }));
 };
 
-// --- TRENDLINES LOGIC ---
+// --- TRENDLINES & SMC LOGIC ---
+
 interface TrendLineData {
-    time: Time; 
+    time: UTCTimestamp;
     value: number;
 }
 
@@ -139,7 +161,14 @@ export const calculateTrendLines = (data: CandleData[]): { upper: TrendLineData[
     const pivotLookback = 5;
     const highs: { index: number, val: number }[] = [];
     const lows: { index: number, val: number }[] = [];
-    
+
+    // Safe timestamp extraction that handles both ISO string and Unix number
+    const getTs = (idx: number): UTCTimestamp => {
+        const t = data[idx].time;
+        if (typeof t === 'number') return (t > 2000000000 ? Math.floor(t/1000) : t) as UTCTimestamp;
+        return Math.floor(new Date(t).getTime() / 1000) as UTCTimestamp;
+    };
+
     for (let i = pivotLookback; i < data.length - pivotLookback; i++) {
         let isHigh = true, isLow = true;
         for (let j = 1; j <= pivotLookback; j++) {
@@ -158,7 +187,7 @@ export const calculateTrendLines = (data: CandleData[]): { upper: TrendLineData[
         for (const p of recentPoints) {
             sumX += p.index; sumY += p.val; sumXY += p.index * p.val; sumXX += p.index * p.index;
         }
-        if (n * sumXX - sumX * sumX === 0) return null; 
+        if (n * sumXX - sumX * sumX === 0) return null; // Avoid division by zero
         const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
         const intercept = (sumY - slope * sumX) / n;
         if (!Number.isFinite(slope) || !Number.isFinite(intercept)) return null;
@@ -174,7 +203,7 @@ export const calculateTrendLines = (data: CandleData[]): { upper: TrendLineData[
         for (let i = upperReg.startIndex; i < data.length; i++) {
             const val = upperReg.slope * i + upperReg.intercept;
             if (Number.isFinite(val)) {
-                upperSeries.push({ time: data[i].time, value: val });
+                upperSeries.push({ time: getTs(i), value: val });
             }
         }
     }
@@ -182,57 +211,46 @@ export const calculateTrendLines = (data: CandleData[]): { upper: TrendLineData[
         for (let i = lowerReg.startIndex; i < data.length; i++) {
             const val = lowerReg.slope * i + lowerReg.intercept;
              if (Number.isFinite(val)) {
-                lowerSeries.push({ time: data[i].time, value: val });
+                lowerSeries.push({ time: getTs(i), value: val });
              }
         }
     }
     return { upper: upperSeries, lower: lowerSeries };
 };
 
-// --- MARKER LOGIC ---
-
 interface SwingPoint {
   index: number;
   price: number;
   type: 'high' | 'low';
-  time: Time;
+  time: UTCTimestamp;
 }
 
 export interface TechnicalAnalysisResult {
-    priceMarkers: SeriesMarker<Time>[];
-    rsiMarkers: SeriesMarker<Time>[];
+    priceMarkers: SeriesMarker<UTCTimestamp>[];
+    rsiMarkers: SeriesMarker<UTCTimestamp>[];
 }
 
 /**
  * Solves the 'vertical stacking' issue by grouping markers by timestamp
  * and resolving them based on institutional significance hierarchy.
  */
-const resolveMarkerConflicts = (raw: SeriesMarker<Time>[]): SeriesMarker<Time>[] => {
-  if (raw.length === 0) return [];
-
-  // 1. Sort by Time Ascending (Using helper to handle string/number)
-  const sortedRaw = [...raw].sort((a, b) => toTimeValue(a.time) - toTimeValue(b.time));
-
-  // 2. Group by exact time match
-  const map = new Map<string | number, SeriesMarker<Time>[]>();
-  
-  for (const m of sortedRaw) {
-    const key = m.time as string | number;
-    if (typeof key === 'object') continue; 
-    if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(m);
+const resolveMarkerConflicts = (raw: SeriesMarker<UTCTimestamp>[]): SeriesMarker<UTCTimestamp>[] => {
+  const map = new Map<number, SeriesMarker<UTCTimestamp>[]>();
+  for (const m of raw) {
+    const t = m.time as number;
+    if (!map.has(t)) map.set(t, []);
+    map.get(t)!.push(m);
   }
 
-  const result: SeriesMarker<Time>[] = [];
-  
-  map.forEach((ms) => {
+  const result: SeriesMarker<UTCTimestamp>[] = [];
+  for (const [time, ms] of map.entries()) {
     if (ms.length === 1) {
       result.push(ms[0]);
-      return;
+      continue;
     }
 
-    // Priority Weighting
-    const getWeight = (text: string = '') => {
+    // PRIORITY HIERARCHY
+    const getWeight = (text: string) => {
       if (text.includes('CHoCH')) return 1000;
       if (text.includes('H&S') || text.includes('Inv H&S')) return 950;
       if (text.includes('BOS')) return 900;
@@ -246,60 +264,64 @@ const resolveMarkerConflicts = (raw: SeriesMarker<Time>[]): SeriesMarker<Time>[]
       return 100;
     };
 
-    const sorted = ms.sort((a, b) => getWeight(b.text) - getWeight(a.text));
+    const sorted = ms.sort((a, b) => getWeight(b.text || '') - getWeight(a.text || ''));
     
-    // Combine names for highest tier conflicts
-    const highTier = sorted.filter(m => getWeight(m.text) >= 600);
+    // Combine names for highest tier conflicts (CHoCH/BOS/OB), otherwise take best
+    const highTier = sorted.filter(m => getWeight(m.text || '') >= 600);
     if (highTier.length > 1) {
         const uniqueTexts = Array.from(new Set(highTier.map(m => m.text)));
+        // Limit to 2 labels to prevent clutter
         const combinedText = uniqueTexts.slice(0, 2).join('/');
         result.push({ ...highTier[0], text: combinedText, size: 1.2 });
     } else {
         result.push(sorted[0]);
     }
-  });
-  
-  // 3. Final Sort (Required by v5)
-  return result.sort((a, b) => toTimeValue(a.time) - toTimeValue(b.time));
+  }
+  return result;
 };
 
 export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicator>): TechnicalAnalysisResult => {
-  let priceMarkers: SeriesMarker<Time>[] = [];
-  let rsiMarkers: SeriesMarker<Time>[] = [];
-  
+  let priceMarkers: SeriesMarker<UTCTimestamp>[] = [];
+  let rsiMarkers: SeriesMarker<UTCTimestamp>[] = [];
   if (data.length < 15) return { priceMarkers, rsiMarkers };
 
-  // --- 1. PATTERNS (SPLIT LOGIC) ---
+  // Helper for safe timestamp
+  const getTs = (d: CandleData): UTCTimestamp => {
+      const tRaw = d.time;
+      return (typeof tRaw === 'number' ? (tRaw > 2000000000 ? Math.floor(tRaw/1000) : tRaw) : Math.floor(new Date(tRaw).getTime() / 1000)) as UTCTimestamp;
+  };
+
   if (indicators.has('Patterns')) {
-     
-     // A. Geometric Patterns (Requires looking forward, stops early)
-     const pivot = 5;
+    logDebug('Patterns', 'Starting Analysis: Swings and Candlestick Patterns...');
+     let patternCount = 0;
+     const pivot = 15;
      const swings: SwingPoint[] = [];
-     
-     // Loop stops BEFORE the end to confirm pivot
      for(let i = pivot; i < data.length - pivot; i++) {
          let isH = true, isL = true;
          for(let j=1; j<=pivot; j++) {
             if(data[i-j].high > data[i].high || data[i+j].high > data[i].high) isH = false;
             if(data[i-j].low < data[i].low || data[i+j].low < data[i].low) isL = false;
          }
-         const t = data[i].time;
+         
+         const t = getTs(data[i]);
+         
          if(isH) swings.push({ index: i, price: data[i].high, type: 'high', time: t });
          if(isL) swings.push({ index: i, price: data[i].low, type: 'low', time: t });
      }
      const highs = swings.filter(s => s.type === 'high');
      const lows = swings.filter(s => s.type === 'low');
 
-     // Double Top
+     // Double Top/Bottom
      for(let i=1; i<highs.length; i++) {
         if (Math.abs(highs[i].price - highs[i-1].price) / highs[i].price < 0.002) {
             priceMarkers.push({ time: highs[i].time, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'D-Top' });
+        patternCount++;
         }
      }
-     // Double Bottom
      for(let i=1; i<lows.length; i++) {
         if (Math.abs(lows[i].price - lows[i-1].price) / lows[i].price < 0.002) {
             priceMarkers.push({ time: lows[i].time, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'D-Bot' });
+        patternCount++;
         }
      }
 
@@ -312,10 +334,13 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
             if (h.price > ls.price && h.price > rs.price) {
                 if (Math.abs(ls.price - rs.price) / ls.price < 0.015) {
                     priceMarkers.push({ time: h.time, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'H&S', size: 1.5 });
+                   patternCount++;
                 }
             }
         }
      }
+
+     // Inverse Head & Shoulders
      if (lows.length >= 3) {
         for (let i = 2; i < lows.length; i++) {
             const ls = lows[i-2];
@@ -324,15 +349,14 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
             if (h.price < ls.price && h.price < rs.price) {
                 if (Math.abs(ls.price - rs.price) / ls.price < 0.015) {
                     priceMarkers.push({ time: h.time, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'Inv H&S', size: 1.5 });
+                    patternCount++;
                 }
             }
         }
      }
 
-     // B. Candlestick Patterns (Live Edge)
-     // FIX: This loop now runs independently to the VERY END of data
-     // This ensures live candles get markers (Hammers, Engulfing, etc.)
-     for (let i = 5; i < data.length; i++) {
+     // --- Candlestick Patterns ---
+     for (let i = 2; i < data.length; i++) {
          const curr = data[i];
          const prev = data[i-1];
          const prev2 = data[i-2];
@@ -341,7 +365,7 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
          const body = Math.abs(curr.close - curr.open);
          const isGreen = curr.close > curr.open;
          const isRed = curr.close < curr.open;
-         const t = curr.time; // Direct time
+         const t = getTs(curr);
          
          if (range === 0) continue;
 
@@ -350,6 +374,7 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
              const color = isGreen ? '#00dc82' : '#ff4d4d';
              const text = isGreen ? 'Bull Maru' : 'Bear Maru';
              priceMarkers.push({ time: t, position: isGreen ? 'belowBar' : 'aboveBar', color, shape: 'circle', text, size: 0.5 });
+            patternCount++;
          }
 
          // Doji
@@ -359,8 +384,10 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
              const lowerWick = Math.min(curr.open, curr.close) - curr.low;
              if (upperWick < range * 0.1) {
                  priceMarkers.push({ time: t, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'D-Fly Doji', size: 0.8 });
+                 patternCount++;
              } else if (lowerWick < range * 0.1) {
                  priceMarkers.push({ time: t, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'G-Stone Doji', size: 0.8 });
+                 patternCount++;
              }
          }
 
@@ -372,8 +399,10 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
              const trendLookback = Math.max(0, i - 5);
              if (curr.close < data[trendLookback].close) {
                  priceMarkers.push({ time: t, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'Hammer' });
-             } else {
+                 patternCount++;
+            } else {
                  priceMarkers.push({ time: t, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'Hang Man' });
+                 patternCount++;
              }
          }
 
@@ -382,19 +411,23 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
             const trendLookback = Math.max(0, i - 5);
             if (curr.close > data[trendLookback].close) {
                  priceMarkers.push({ time: t, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'Shoot Star' });
+                 patternCount++;
             } else {
                  priceMarkers.push({ time: t, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'Inv Hammer' });
+                 patternCount++;
             }
          }
 
-         // Engulfing
+         // Engulfing Patterns
          const prevBody = Math.abs(prev.close - prev.open);
-         if (prevBody > (prev.high - prev.low) * 0.3) { 
+         if (prevBody > (prev.high - prev.low) * 0.3) {
              if (prev.close < prev.open && isGreen && curr.close > prev.open && curr.open < prev.close) {
                  priceMarkers.push({ time: t, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'Bull Engulf', size: 1 });
+                 patternCount++;
              }
              if (prev.close > prev.open && isRed && curr.close < prev.open && curr.open > prev.close) {
                  priceMarkers.push({ time: t, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'Bear Engulf', size: 1 });
+                 patternCount++;
              }
          }
 
@@ -409,21 +442,25 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
              const isC3Green = c3.close > c3.open;
 
              if (isC1Red && isC3Green && c1Body > (c1.high - c1.low) * 0.6) {
-                 if (c2Body < c1Body * 0.4) { 
+                 if (c2Body < c1Body * 0.4) {
                      const midpoint = (c1.open + c1.close) / 2;
                      if (c3.close > midpoint) {
                          priceMarkers.push({ time: t, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'Morn Star', size: 1.2 });
+                         patternCount++;
                      }
                  }
              }
          }
      }
+     logDebug('Patterns', `Analysis Complete. Matches Found: ${patternCount}`);
   }
 
   // --- SMC LOGIC ---
   if (indicators.has('SMC')) {
+      logDebug('SMC', 'Scanning for Smart Money Concepts (BOS, OB, FVG)...');
+      let smcEvents = 0;
       const pivot = 3; 
-      const swings: {index: number, price: number, type: 'high'|'low', time: Time}[] = [];
+      const swings: {index: number, price: number, type: 'high'|'low', time: UTCTimestamp}[] = [];
       
       // Identify Swings
       for (let i = pivot; i < data.length - pivot; i++) {
@@ -431,10 +468,9 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
         for(let j=1; j<=pivot; j++) {
             if(data[i-j].high > data[i].high || data[i+j].high > data[i].high) isH = false;
             if(data[i-j].low < data[i].low || data[i+j].low < data[i].low) isL = false;
-         }
-         const t = data[i].time;
-         if (isH) swings.push({index: i, price: data[i].high, type: 'high', time: t});
-         if (isL) swings.push({index: i, price: data[i].low, type: 'low', time: t});
+        }
+        if (isH) swings.push({index: i, price: data[i].high, type: 'high', time: getTs(data[i])});
+        if (isL) swings.push({index: i, price: data[i].low, type: 'low', time: getTs(data[i])});
       }
 
       // Structure Breaks (BOS) & Order Blocks
@@ -442,7 +478,7 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
           const s = swings[i];
           for (let k = s.index + 1; k < data.length; k++) {
               const candle = data[k];
-              const t = candle.time;
+              const t = getTs(candle);
               
               if (s.type === 'high') {
                   if (candle.close > s.price) {
@@ -450,7 +486,8 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
                           priceMarkers.push({
                               time: t, position: 'aboveBar', color: '#00dc82', shape: 'arrowUp', text: 'BOS', size: 1
                           });
-                          // OB Logic
+                          smcEvents++;
+                          // Bullish OB
                           let minPrice = Infinity;
                           let minIdx = -1;
                           for(let m = s.index; m < k; m++) {
@@ -461,8 +498,9 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
                           }
                           if (minIdx !== -1) {
                               priceMarkers.push({
-                                  time: data[minIdx].time, position: 'belowBar', color: '#3b82f6', shape: 'square', text: 'Bull OB', size: 1
+                                  time: getTs(data[minIdx]), position: 'belowBar', color: '#3b82f6', shape: 'square', text: 'Bull OB', size: 1
                               });
+                              smcEvents++;
                           }
                       }
                       break; 
@@ -473,7 +511,8 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
                           priceMarkers.push({
                               time: t, position: 'belowBar', color: '#ff4d4d', shape: 'arrowDown', text: 'BOS', size: 1
                           });
-                          // OB Logic
+                          smcEvents++;
+                          // Bearish OB
                           let maxPrice = -Infinity;
                           let maxIdx = -1;
                           for(let m = s.index; m < k; m++) {
@@ -484,8 +523,9 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
                           }
                           if (maxIdx !== -1) {
                               priceMarkers.push({
-                                  time: data[maxIdx].time, position: 'aboveBar', color: '#f472b6', shape: 'square', text: 'Bear OB', size: 1
+                                  time: getTs(data[maxIdx]), position: 'aboveBar', color: '#f472b6', shape: 'square', text: 'Bear OB', size: 1
                               });
+                              smcEvents++;
                           }
                       }
                       break;
@@ -494,7 +534,7 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
           }
       }
 
-      // FVG
+      // Fair Value Gaps (FVG)
       for(let i = 0; i < data.length - 2; i++) {
           const c1 = data[i];
           const c2 = data[i+1];
@@ -506,28 +546,33 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
              const gap = c3.low - c1.high;
              if (gap > range * 0.1 && c2.close > c2.open) {
                  priceMarkers.push({
-                     time: c2.time, position: 'belowBar', color: '#fbbf24', shape: 'circle', text: 'FVG', size: 0.6
+                     time: getTs(c2), position: 'belowBar', color: '#fbbf24', shape: 'circle', text: 'FVG', size: 0.6
                  });
+                 smcEvents++;
              }
           }
           if (c3.high < c1.low) {
              const gap = c1.low - c3.high;
              if (gap > range * 0.1 && c2.close < c2.open) {
                  priceMarkers.push({
-                     time: c2.time, position: 'aboveBar', color: '#fbbf24', shape: 'circle', text: 'FVG', size: 0.6
+                     time: getTs(c2), position: 'aboveBar', color: '#fbbf24', shape: 'circle', text: 'FVG', size: 0.6
                  });
+                 smcEvents++;
              }
           }
       }
+      logDebug('SMC', `Analysis Complete. Events Found (BOS/OB/FVG): ${smcEvents}`);
   }
 
-  // --- RSI DIVERGENCE ---
+  // --- RSI DIVERGENCE ---24.01.26//SentiTraderAIBeta/dev.team
   if (indicators.has('RSI')) {
+    logDebug('RSI Div', 'Checking for Bullish/Bearish Divergences...');
+      let divCount = 0;
       const pivot = 5;
-      const lookback = 30; 
+      const lookback = 20; 
 
-      const highs: {index: number, price: number, rsi: number, time: Time}[] = [];
-      const lows: {index: number, price: number, rsi: number, time: Time}[] = [];
+      const highs: {index: number, price: number, rsi: number, time: UTCTimestamp}[] = [];
+      const lows: {index: number, price: number, rsi: number, time: UTCTimestamp}[] = [];
 
       for(let i = pivot; i < data.length - pivot; i++) {
           const currentRsi = data[i].rsi;
@@ -540,14 +585,13 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
               if (data[i-k].low < data[i].low || data[i+k].low < data[i].low) isLow = false;
           }
           
-          const t = data[i].time;
+          const t = getTs(data[i]);
           
           if (isHigh) {
               highs.push({ index: i, price: data[i].high, rsi: currentRsi, time: t });
               if (highs.length >= 2) {
                   const curr = highs[highs.length-1];
                   const prev = highs[highs.length-2];
-                  // Bearish Divergence
                   if (curr.index - prev.index < lookback) {
                        if (curr.price > prev.price && curr.rsi < prev.rsi) {
                            priceMarkers.push({
@@ -556,6 +600,8 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
                            rsiMarkers.push({
                                time: t, position: 'aboveBar', color: '#ff4d4d', shape: 'arrowDown', text: 'Bear Div', size: 1
                            });
+                           divCount++;
+                           logDebug('RSI Div', `Bearish Divergence found at index ${i}`);
                        }
                   }
               }
@@ -566,7 +612,6 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
               if (lows.length >= 2) {
                   const curr = lows[lows.length-1];
                   const prev = lows[lows.length-2];
-                  // Bullish Divergence
                   if (curr.index - prev.index < lookback) {
                        if (curr.price < prev.price && curr.rsi > prev.rsi) {
                            priceMarkers.push({
@@ -575,16 +620,19 @@ export const getTechnicalMarkers = (data: CandleData[], indicators: Set<Indicato
                            rsiMarkers.push({
                                time: t, position: 'belowBar', color: '#00dc82', shape: 'arrowUp', text: 'Bull Div', size: 1
                            });
+                           divCount++;
+                           logDebug('RSI Div', `Bearish Divergence found at index ${i}`);
                        }
                   }
               }
           }
       }
+      logDebug('RSI Div', `Analysis Complete. Total Divergences: ${divCount}`);
   }
 
-  // Final Sort using the helper
+  // FINAL SORT: Strict ascending order is required by Lightweight Charts
   return {
-      priceMarkers: resolveMarkerConflicts(priceMarkers),
-      rsiMarkers: resolveMarkerConflicts(rsiMarkers)
+      priceMarkers: resolveMarkerConflicts(priceMarkers.sort((a, b) => (a.time as number) - (b.time as number))),
+      rsiMarkers: resolveMarkerConflicts(rsiMarkers.sort((a, b) => (a.time as number) - (b.time as number)))
   };
 };
